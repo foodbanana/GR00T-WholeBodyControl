@@ -406,6 +406,12 @@ def main():
     parser.add_argument("--interface", default="eth0")
     parser.add_argument("--port", type=int, default=5555)
     parser.add_argument("--head-mount", default="ego_view")
+    parser.add_argument("--head-resize", default=None,
+                        help="머리(ego_view)를 이 크기로 Orin에서 사전 리사이즈해 발행 "
+                             "(예: 640x480). 미지정 시 원본(1080p) JPEG 그대로 relay. 지정 시 "
+                             "RPC JPEG를 디코드→리사이즈→재인코딩 → DGX 디코드/리사이즈 부담↓ + "
+                             "대역폭↓. Orin CPU 여유 있을 때 사용(3-cam 30fps 목적). exporter는 "
+                             "이때 --camera-decode-reduce 1 로(이미 640x480이라 reduce 불필요).")
     parser.add_argument("--timeout", type=float, default=3.0)
     parser.add_argument("--fps-log-interval", type=float, default=5.0)
 
@@ -438,6 +444,15 @@ def main():
         print("\n[3cam] 위 by-id 경로를 --left-node / --right-node 로 지정하세요"
               "(재열거에도 안정적).", flush=True)
         sys.exit(0)
+
+    # ---- 머리 사전 리사이즈 파싱 (예: "640x480") ----------------------------
+    head_resize = None
+    if args.head_resize:
+        _hw, _hh = args.head_resize.lower().split("x")
+        head_resize = (int(_hw), int(_hh))
+        print(f"[3cam] 머리 사전 리사이즈 ON: {head_resize[0]}x{head_resize[1]} "
+              f"(RPC 1080p JPEG → 디코드→리사이즈→재인코딩). exporter는 "
+              f"--camera-decode-reduce 1 권장.", flush=True)
 
     # ---- ZMQ PUB -----------------------------------------------------------
     ctx = zmq.Context()
@@ -567,7 +582,18 @@ def main():
                 continue
 
             ts = time.time()
-            images = {args.head_mount: bytes(data)}
+            head_bytes = bytes(data)
+            # 사전 리사이즈: RPC 1080p JPEG를 Orin에서 640x480으로 줄여 재인코딩.
+            # DGX는 작은 640x480만 디코드(리사이즈 불필요) → 3-cam 30fps 목적.
+            if head_resize is not None:
+                _m = cv2.imdecode(np.frombuffer(head_bytes, np.uint8), cv2.IMREAD_COLOR)
+                if _m is not None:
+                    _m = cv2.resize(_m, head_resize, interpolation=cv2.INTER_AREA)
+                    _ok, _b = cv2.imencode(".jpg", _m,
+                                           [int(cv2.IMWRITE_JPEG_QUALITY), args.jpeg_quality])
+                    if _ok:
+                        head_bytes = _b.tobytes()
+            images = {args.head_mount: head_bytes}
             timestamps = {args.head_mount: ts}
 
             for mount, latest in wrist_latests.items():

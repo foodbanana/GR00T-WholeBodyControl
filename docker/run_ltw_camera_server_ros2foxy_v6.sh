@@ -67,6 +67,12 @@ if [[ "${NO_WRISTS:-}" == "1" ]]; then
     FWD_ARGS+=(--no-wrists)
     echo "[ltw-camera-server] NO_WRISTS=1 → head-only(ego_view)만 발행 (1-cam baseline)"
 fi
+# 3-cam 30fps 실험: 머리를 Orin에서 640x480으로 사전 리사이즈해 발행.
+# 사용: HEAD_RESIZE=640x480 ./docker/run_...v6.sh  (exporter는 --camera-decode-reduce 1)
+if [[ -n "${HEAD_RESIZE:-}" ]]; then
+    FWD_ARGS+=(--head-resize "$HEAD_RESIZE")
+    echo "[ltw-camera-server] HEAD_RESIZE=$HEAD_RESIZE → 머리 사전 리사이즈(Orin 디코드+리사이즈+재인코딩)"
+fi
 
 echo "[ltw-camera-server] Starting 3-cam container..."
 echo "[ltw-camera-server]   image     : $IMAGE_TAG"

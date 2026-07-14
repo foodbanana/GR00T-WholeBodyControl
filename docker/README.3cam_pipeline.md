@@ -8,27 +8,30 @@
 
 ---
 
-## 0. 지금 동작하는 상태 (KNOWN-GOOD, 롤백 목표)
+## 0. 지금 동작하는 상태 (채택본 = HEAD_RESIZE 25Hz)
 
-- **성능**: 3-cam achieved **~15.7~17.6Hz**, `--dataset-fps 15` 시 **speedup 0.98x(정상 재생)**.
-- **검증**: LeRobot 로더(`LeRobotDataset`)로 실제 로딩 성공 — 3카메라 (3,480,640) 디코드 + state(43) + action.wbc(43) 정렬 확인. VLA 파인튜닝 소비 가능.
-- **저장물**: `outputs/<날짜>/` — 3카메라 640×480 mp4 + parquet + meta(info/modality/episodes/tasks/stats). frame_index 0..N 연속, timestamp 균일 1/fps 그리드, NaN 없음.
+- **성능**: HEAD_RESIZE(Orin 사전리사이즈) 채택 → 3-cam achieved **~25Hz**, `--dataset-fps 20` 시 **speedup ~1.0**. (사전리사이즈 전 baseline은 ~17.6Hz/15fps — 롤백 지점)
+- **Orin CPU**: 사전리사이즈 후 idle 68%(전 86%), 여유 충분.
+- **검증**: LeRobot 로더(`LeRobotDataset`)로 실제 로딩 성공 — 3카메라 (3,480,640) 디코드 + state(43) + action.wbc(43) 정렬 확인. `gear_sonic/scripts/verify_dataset.py`로 자동검증. VLA 파인튜닝 소비 가능.
+- **저장물**: `outputs/<날짜>/` — 3카메라 640×480 mp4 + parquet + meta. frame_index 연속, timestamp 균일 그리드, NaN 없음.
 
-### 확정 실행 명령 (본격 수집용)
+### 확정 실행 명령 (본격 수집용 — HEAD_RESIZE 채택본)
 ```bash
 # --- Orin NX (온보드) ---
 sudo bash ./docker/disable_d405_autosuspend.sh    # D405 2대 5000Mbps 확인 (매 부팅)
+HEAD_RESIZE=640x480 \
 LEFT_NODE=/dev/v4l/by-id/usb-Intel_R__RealSense_TM__Depth_Camera_405_Intel_R__RealSense_TM__Depth_Camera_405_255323073651-video-index4 \
 RIGHT_NODE=/dev/v4l/by-id/usb-Intel_R__RealSense_TM__Depth_Camera_405_Intel_R__RealSense_TM__Depth_Camera_405_255323071827-video-index4 \
 ./docker/run_ltw_camera_server_ros2foxy_v6.sh
-# 로그: "ZMQ PUB bound ... (SNDHWM=3, latest-only)" + 손목 각 fps~30
+# 로그: "SNDHWM=3, latest-only" + "HEAD_RESIZE=640x480 → 머리 사전 리사이즈" + 손목 fps~30
 
-# --- DGX Spark ---
+# --- DGX Spark (ego가 이미 640x480이라 reduce 1) ---
 python gear_sonic/scripts/run_data_exporter.py \
     --task-prompt "..." --camera-host 192.168.123.164 --camera-port 5555 \
     --use-nvenc --camera-triggered \
-    --record-wrist-cameras --camera-decode-reduce 2 --dataset-fps 15
+    --record-wrist-cameras --camera-decode-reduce 1 --dataset-fps 20
 ```
+> **baseline 롤백**(사전리사이즈 끄기): Orin에서 `HEAD_RESIZE` 빼고, DGX `--camera-decode-reduce 2 --dataset-fps 15`. → 17.6Hz/15fps known-good.
 
 ---
 
@@ -94,10 +97,19 @@ python gear_sonic/scripts/run_data_exporter.py \
 
 ---
 
-## 4. ▶ 다음 시도: forwarder 사전 리사이즈 (17.6→30Hz) + 롤백 방법
+## 4. ✅ forwarder 사전 리사이즈 — 완료·채택 (17.6→25Hz)
 
-### 목표
-DGX 메인스레드의 ego_view 디코드+리사이즈(~15ms)를 없애기 위해, **Orin의 forwarder가 ego_view를 미리 640×480으로 줄여 전송**. 그러면 DGX는 작은 이미지만 받아 처리 → achieved 30Hz 가능. 부수효과: 대역폭↓.
+### 결과 (2026-07-14)
+`camera_forwarder_3cam.py`에 `--head-resize 640x480` 추가(run_v6.sh `HEAD_RESIZE=640x480`). Orin이 RPC 1080p JPEG를 디코드→640×480 리사이즈→재인코딩해 발행. 측정:
+- **achieved 17.6 → 25Hz (+42%)**, rsz_ego 0.01ms(DGX 리사이즈 소멸), dec_ego ~10→3ms.
+- **Orin CPU idle 86→68%** (여유 충분, 안전).
+- 30은 아님 — 남은 오버헤드(폴링/그리드/GIL/손목디코드), diminishing returns라 25Hz 채택.
+- exporter는 ego가 640×480이므로 **`--camera-decode-reduce 1`**, 재생 정확히 `--dataset-fps 20`.
+- 부수효과: 뷰어 head 밑 검은패딩 사라짐(ego 640×480 4:3 = 손목과 동일 종횡비).
+- **videohub 토픽 불채택**: video360p(640×360)=업스케일 화질손실, video720p=DGX 디코드 안 싸짐. RPC 1080p→Orin 리사이즈가 최선.
+
+### (참고) 원래 목표
+DGX 메인스레드의 ego_view 디코드+리사이즈(~15ms)를 없애기 위해, **Orin의 forwarder가 ego_view를 미리 640×480으로 줄여 전송**. DGX는 작은 이미지만 처리. 부수효과: 대역폭↓.
 
 ### 후보 방식 (택1)
 1. **raw 전송**: forwarder가 imdecode→resize(640×480)→**재인코딩 없이 raw ndarray**로 send. DGX는 디코드·리사이즈 0. 대역폭 640×480×3×30 ≈ 27MB/s(Gigabit OK). Orin은 디코드+리사이즈만(~15ms/frame).
