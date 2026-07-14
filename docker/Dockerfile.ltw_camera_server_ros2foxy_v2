@@ -1,0 +1,229 @@
+# =============================================================================
+# ltw-camera-server:0.4-foxy
+#
+# Unitree G1 head(ego-view) 카메라 프레임을, PC2(Orin NX)의 videohub_pc4가
+# ROS 2 topic(/frontvideostream)으로 publish 중인 프레임을 rclpy로
+# subscribe해서 그대로 ZMQ port 5555로 msgpack forward한다.
+#
+# Target: Unitree G1 Orin NX (PC2, eth0 192.168.123.164/24, aarch64,
+#         호스트 OS Ubuntu 20.04 / JetPack R35.3.1, 호스트 ROS 2: Foxy)
+#
+# 이미지명:   ltw-camera-server:0.4-foxy
+# 컨테이너명: ltw-camera-server
+#
+# [이전 시도 대비 이번 접근의 차이]
+#   0.1-rgb : D435i를 컨테이너 안에서 직접 USB open — 다른 팀과 카메라
+#             장치를 두고 충돌, --device 마운트 필요.
+#   0.2-dds : unitree_sdk2py의 raw ChannelSubscriber로 구독 시도 — 콜백이
+#             한 번도 안 불림. /frontvideostream은 raw DDS topic이 아니라
+#             ROS 2 topic(rclpy/rclcpp)이라, raw DDS reader는 ROS 2 RMW의
+#             encapsulation/QoS를 이해 못 해 discovery 자체가 안 됨.
+#   0.3-ros2: ros:foxy-ros-base 기반 + CycloneDDS 0.10.2를 소스에서 직접
+#             빌드(ENABLE_SHM=OFF)해서 호스트와 wire protocol 맞춤. 작동은
+#             했으나 이미지가 무겁고, base image가 aarch64 전용이 아니라서
+#             Jetson 최적화 레이어(CUDA/L4T 런타임 등)를 못 씀.
+#   0.4-foxy(이 파일): base를 nvcr.io/nvidia/l4t-jetpack으로 바꾸고,
+#             CycloneDDS는 소스 빌드 대신 apt(ros-foxy-rmw-cyclonedds-cpp,
+#             0.7.x)로 설치 — 호스트가 쓰는 apt 버전과 정확히 같은 패키지를
+#             그대로 받아 wire protocol 불일치 리스크를 원천 차단. gear_sonic
+#             재사용도 포기하고 독립 subscriber(src/camera_subscriber.py)로
+#             교체 — Python 3.10 문법(match 등)이 이 이미지의 Python 3.8과
+#             안 맞았기 때문.
+#
+# [배경] 0.1 ~ 0.3 Dockerfile은 학습 자산으로 보존, 수정하지 않는다.
+#
+# [Build] (Orin NX에서, GR00T-WholeBodyControl/docker/ 디렉토리를 build
+#          context로 — src/, config/ 상대 경로 COPY 때문에 docker/ 루트로
+#          지정해야 한다)
+#   docker build -f docker/Dockerfile.ltw_camera_server_ros2foxy \
+#                -t ltw-camera-server:0.4-foxy docker/
+#
+# [Run]
+#   ./docker/run_ltw_camera_server_ros2foxy.sh
+#
+# [Rollback]
+#   docker rm -f ltw-camera-server 2>/dev/null; docker rmi ltw-camera-server:0.4-foxy
+# =============================================================================
+
+# l4t-jetpack r35.3.1 = JetPack 5.1.1 = Ubuntu 20.04(focal) 기반 — 호스트
+# OS(Ubuntu 20.04, Foxy)와 정확히 일치. ros:foxy-ros-base(0.3-ros2에서 사용)
+# 대신 이 base를 쓰는 이유는, l4t-jetpack이 Jetson용 CUDA/L4T 런타임
+# 레이어를 이미 포함하고 있어 향후 GPU 가속(예: 영상 처리)이 필요해질 때
+# 추가 base 교체 없이 확장 가능하기 때문. 이번 컨테이너 자체는 GPU를 쓰지
+# 않지만, 이 base 선택은 팀의 다른 Jetson 이미지들과의 일관성이기도 하다.
+FROM nvcr.io/nvidia/l4t-jetpack:r35.3.1
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV ROS_DISTRO=foxy
+ENV LANG=en_US.UTF-8
+ENV LC_ALL=en_US.UTF-8
+SHELL ["/bin/bash", "-c"]
+
+# -----------------------------------------------------------------------------
+# 1. Base tools + locale
+# -----------------------------------------------------------------------------
+# build-essential + cmake: unitree_go colcon build가 rosidl typesupport C
+# 코드를 컴파일할 때 필요 (섹션 4). 이 이미지에서는 CycloneDDS C 라이브러리를
+# 직접 빌드하지 않으므로(섹션 3에서 apt로 대체) 0.3-ros2보다 훨씬 가볍다.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        cmake \
+        curl \
+        git \
+        gnupg \
+        locales \
+        lsb-release \
+        python3-pip \
+    && locale-gen en_US.UTF-8 \
+    && update-locale LANG=en_US.UTF-8 \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# 2. ROS 2 Foxy apt source
+# -----------------------------------------------------------------------------
+# r35.3.1 = Ubuntu 20.04 = focal 이므로 ROS 2 공식 apt repo도 focal용 라인을
+# 그대로 사용하면 된다 (별도 backport/PPA 불필요).
+RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+        -o /usr/share/keyrings/ros-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" \
+        > /etc/apt/sources.list.d/ros2.list
+
+# -----------------------------------------------------------------------------
+# 3. ROS 2 Foxy + rmw-cyclonedds (apt, 소스빌드 안 함)
+# -----------------------------------------------------------------------------
+# 왜 rmw_cyclonedds_cpp인가: 호스트 videohub_pc4가 이 RMW로 publish 중이다.
+# Foxy 기본 RMW(rmw_fastrtps_cpp)로 두면 discovery 자체가 안 된다.
+#
+# 왜 소스빌드를 안 하는가(0.3-ros2와의 핵심 차이): apt로 설치되는
+# ros-foxy-rmw-cyclonedds-cpp는 CycloneDDS 0.7.x 계열이고, 호스트 Orin NX의
+# videohub_pc4도 동일하게 apt 0.7.x 스택 위에서 돈다. 버전을 소스에서 임의로
+# 올리면(예: 0.10.2) wire protocol이 달라져 discovery가 조용히 실패한다 —
+# 과거 이 프로젝트에서 0.10.5로 시도했다가 크래시는 안 났지만 G1이 밸런스를
+# 잃고 발산한 사고 이력이 있다(다른 컴포넌트, DGX Spark sim2sim 작업 당시).
+# apt 버전을 그대로 쓰면 호스트와 정확히 같은 패키지이므로 이 리스크가 없다.
+#
+# ros-foxy-rosidl-generator-dds-idl: unitree_go 메시지 패키지(섹션 4)의
+# colcon build가 rosidl_generator_dds_idlConfig.cmake를 요구한다.
+#
+# python3-colcon-common-extensions / python3-empy / python3-lark /
+# python3-catkin-pkg: unitree_go 메시지 소스 빌드(colcon)에 필요한 파이썬
+# 빌드 도구 체인.
+#
+# 여기서 unitree_sdk2py는 절대 설치하지 않는다 — raw DDS 채널 접근용
+# 라이브러리라 이 컨테이너의 목적(rclpy subscribe)과 안 맞을 뿐 아니라,
+# 의존성으로 cyclonedds 0.10.x대 python 바인딩을 끌어와 위에서 맞춰둔
+# apt 0.7.0 스택과 충돌한다.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3-catkin-pkg \
+        python3-empy \
+        python3-lark \
+        ros-foxy-ros-base \
+        ros-foxy-rmw-cyclonedds-cpp \
+        ros-foxy-rosidl-generator-dds-idl \
+        python3-colcon-common-extensions \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# 4. unitree_go message package (Plan B: in-repo minimal vendor)
+# -----------------------------------------------------------------------------
+# v1(0.4-foxy) 실패 원인: https://github.com/unitreerobotics/unitree_ros2를
+# clone해서 `colcon build --packages-select unitree_go`를 시도했으나
+# 그 repo에는 unitree_go 패키지가 실제로 존재하지 않음(Go2 ROS 2 예제
+# 모음이지 메시지 정의 저장소가 아니었음). colcon은 "0 packages finished"로
+# 조용히 종료했고 install/COLCON_IGNORE만 남았음.
+#
+# v2 접근: 우리가 필요한 최소 unitree_go 패키지를 프로젝트 안에 vendor로
+# 정의하고, 그것을 그대로 콜콘 빌드한다.
+#
+# vendor 구조 (docker/vendor/unitree_go/):
+#   package.xml         표준 rosidl_interface_packages 그룹 소속
+#   CMakeLists.txt      rosidl_generate_interfaces 표준 패턴
+#   msg/Go2FrontVideoData.msg
+#      호스트의 프로덕션 소스에서 그대로 복사한 필드 정의:
+#      /upgradePythonServer/temp/unitree/module/graph_pid_ws/src/
+#          unitree_go/msg/Go2FrontVideoData.msg
+#
+# Wire protocol 매칭 근거:
+#   - 필드 정의가 호스트 원본과 동일 → DDSI-RTPS wire format 자동 매칭
+#     (DDS 표준: 필드 정의가 같으면 언어/생성 도구와 무관하게 wire 호환)
+#   - Foxy로 명시 build → typesupport ABI가 호스트 배포판에 의존하지 않음
+#   - rmw_cyclonedds_cpp(apt 0.7.0)와 typesupport가 동일 이미지에서 나오므로
+#     ABI 매칭 자동
+#
+# 나중에 depth/IMU 등 추가 시:
+#   1. 호스트에서 해당 .msg 파일을 docker/vendor/unitree_go/msg/로 복사
+#   2. CMakeLists.txt의 rosidl_generate_interfaces에 파일명 한 줄 추가
+#   3. 재빌드
+WORKDIR /opt/unitree_ros2_ws
+RUN mkdir -p src
+COPY vendor/unitree_go /opt/unitree_ros2_ws/src/unitree_go
+RUN source /opt/ros/foxy/setup.bash \
+    && colcon build --packages-select unitree_go --symlink-install \
+    && rm -rf build log
+
+# -----------------------------------------------------------------------------
+# 5. Python 런타임 의존성
+# -----------------------------------------------------------------------------
+# pyzmq==25.1.2: 이 아키텍처(aarch64) + Python 3.8 조합에서 prebuilt wheel이
+# 존재하는 마지막 버전 (이전 세션에서 검증됨). 더 최신 버전은 소스 빌드로
+# 떨어져 r35.3.1 환경에서 실패한다.
+# msgpack==1.0.5: 마찬가지로 aarch64 + Python 3.8 prebuilt wheel이 있는
+# 안정 버전.
+RUN python3 -m pip install --no-cache-dir \
+        "pyzmq==25.1.2" \
+        "msgpack==1.0.5"
+
+# -----------------------------------------------------------------------------
+# 6. ROS runtime env
+# -----------------------------------------------------------------------------
+# 호스트 videohub_pc4가 Domain 0에서 rmw_cyclonedds_cpp로 publish 중이므로
+# 여기도 정확히 같은 값으로 고정한다. 하나라도 어긋나면(예: 기본 RMW로
+# 되돌아가거나 다른 domain을 쓰면) discovery가 에러 없이 그냥 조용히
+# 안 된다 — 겉보기엔 정상 기동한 것처럼 보여서 디버깅이 까다롭다.
+ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ENV ROS_DOMAIN_ID=0
+ENV CYCLONEDDS_URI=file:///etc/cyclonedds.xml
+
+# -----------------------------------------------------------------------------
+# 7. App
+# -----------------------------------------------------------------------------
+WORKDIR /app
+COPY src/camera_subscriber.py /app/camera_subscriber.py
+COPY config/cyclonedds.xml /etc/cyclonedds.xml
+
+# -----------------------------------------------------------------------------
+# 8. 개발 편의 (/root/.bashrc) — docker exec로 들어가 디버깅할 때
+#    ROS 2 / unitree_go 환경이 자동으로 잡히도록
+# -----------------------------------------------------------------------------
+RUN { \
+        echo "source /opt/ros/foxy/setup.bash"; \
+        echo "source /opt/unitree_ros2_ws/install/setup.bash"; \
+        echo "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp"; \
+        echo "export CYCLONEDDS_URI=file:///etc/cyclonedds.xml"; \
+    } >> /root/.bashrc
+
+# -----------------------------------------------------------------------------
+# 9. Runtime notes
+# -----------------------------------------------------------------------------
+# - No USB/device passthrough (no --device, no /dev mount) — this image never
+#   opens a camera device, it only subscribes to a ROS 2 topic.
+# - --network host is required for ROS 2/CycloneDDS multicast discovery to
+#   see the host's real eth0 interface.
+# - 이 컨테이너는 videohub_pc4를 절대 재시작/정지하지 않는다 — subscribe만
+#   한다. 로봇은 여러 팀이 공유하므로 다른 팀의 카메라 피드 접근을 깨뜨리면
+#   안 된다.
+EXPOSE 5555
+
+# exec를 붙여 python3가 PID 1이 되도록 한다 — 그래야 `docker stop`이
+# 보내는 SIGTERM을 python3 프로세스가 직접 받아 rclpy.shutdown()/소켓
+# close 등 정리 로직(camera_subscriber.py의 finally 블록)이 실행된다.
+# bash -c로 감쌌을 때 exec가 없으면 bash가 PID 1로 남아 SIGTERM을 못 받고
+# SIGKILL 타임아웃까지 끌려가는 경우가 있다.
+CMD ["bash", "-c", "source /opt/ros/foxy/setup.bash && \
+                    source /opt/unitree_ros2_ws/install/setup.bash && \
+                    exec python3 /app/camera_subscriber.py \
+                         --topic /frontvideostream \
+                         --port 5555 \
+                         --resolution 720p \
+                         --mount-position ego_view"]

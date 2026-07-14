@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  ltw-camera-server (ros2foxy) 용 CycloneDDS 설정.
+
+  호스트(Orin NX)의 /unitree/module/video_hub_pc4/cyclonedds.xml 을 그대로
+  복사한 것 — 이 컨테이너의 rclpy subscriber가 videohub_pc4 publisher와
+  같은 wire-level 설정(interface, domain, multicast)으로 discovery 해야
+  하기 때문. 한쪽만 다르게 설정하면 discovery가 조용히 실패한다
+  (Dockerfile.ltw_camera_server_dds에서 이미 겪은 실패 패턴 — 원인은
+  raw DDS vs ROS 2 RMW 차이였지만, "설정 불일치 → 조용한 discovery 실패"
+  라는 교훈 자체는 여기도 동일하게 적용됨).
+
+  다른 프로젝트에서 흔히 보이는 아래 패턴들은 의도적으로 넣지 않았다:
+    - kist-drl-g1-onboard 스타일의 Domain Id="1" bridge 설정 + AllowMulticast
+      false + Peers(DDS_PEER_IP) — 이건 워크스테이션과 별도 bridge 도메인을
+      만드는 구성이고, 우리는 videohub_pc4가 이미 쓰고 있는 Domain 0을
+      그대로 공유해서 subscribe만 하면 되므로 불필요.
+    - jkw 스타일의 unicast Peer 명시 — 호스트 XML에 Peers 설정이 없다는 것은
+      기본 multicast discovery만으로 videohub_pc4 <-> 우리 subscriber 간
+      discovery가 이루어진다는 뜻이므로, 굳이 unicast peer를 추가할 이유가
+      없음 (오히려 호스트와 달라지는 리스크만 생김).
+
+  Domain Id를 명시하지 않은 것도 호스트 XML과 동일 — CYCLONEDDS_URI가
+  로드되는 순간 참여하는 도메인은 ROS_DOMAIN_ID (컨테이너에서는 0, 호스트와
+  동일) 환경변수로 결정되고, 이 파일은 그 도메인 안에서 어떤 네트워크
+  인터페이스를 쓸지만 지정한다.
+-->
+<CycloneDDS>
+  <Domain>
+    <General>
+      <Interfaces>
+        <NetworkInterface name="eth0" priority="default" multicast="default" />
+      </Interfaces>
+    </General>
+  </Domain>
+</CycloneDDS>

@@ -24,7 +24,9 @@ from dataclasses import dataclass
 from datetime import datetime
 import json
 import time
+import traceback
 
+import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 import tyro
@@ -39,6 +41,7 @@ from gear_sonic.data.features_sonic_vla import (
     get_wrist_camera_modality_config,
 )
 from gear_sonic.camera.composed_camera import ComposedCameraClientSensor
+from gear_sonic.camera.sensor_server import LAST_DECODE_MS  # 계측: 카메라별 디코드 시간
 from gear_sonic.utils.data_collection.episode_state import EpisodeState
 from gear_sonic.utils.data_collection.keyboard_subscriber import ZMQKeyboardSubscriber
 from gear_sonic.utils.data_collection.telemetry import Telemetry
@@ -102,6 +105,34 @@ class SonicDataExporterConfig:
 
     text_to_speech: bool = True
     """Use text-to-speech voice feedback."""
+
+    use_nvenc: bool = False
+    """Encode videos with the GB10 hardware NVENC encoder via system ffmpeg
+    (h264_nvenc) instead of the PyAV software libx264 path. Fixes the encoder
+    throughput bottleneck that made recordings play back too fast."""
+
+    cv2_num_threads: int = 1
+    """Cap OpenCV's internal thread pool (JPEG decode + resize). In the live
+    5-terminal session OpenCV oversubscribes all cores and contends with the
+    C++ WBC / teleop processes, inflating per-frame resize from ~3ms to ~19ms.
+    Set to 1 to be a good citizen; 0 or negative leaves the OpenCV default."""
+
+    camera_decode_reduce: int = 2
+    """Decode incoming camera JPEGs at 1/N resolution via libjpeg scaled decode
+    (1=full, 2=half, 4=quarter). 2 halves the decode+resize cost with no quality
+    loss for the 640x480 target (960x540 >= target). Set 1 to disable."""
+
+    camera_triggered: bool = False
+    """Save one frame per NEW camera frame (camera arrival = the clock) instead
+    of the free-running 50Hz loop. Eliminates duplicate frames and makes the
+    saved rate = camera rate. Uses synthetic uniform timestamps (frame_index/fps)
+    so the mp4/info.json fps is honest and check_timestamps_sync passes."""
+
+    dataset_fps: int = 30
+    """Dataset fps stamped into the mp4 + info.json when camera_triggered. The
+    camera trigger is rate-limited to this on a real-time grid (e.g. a ~36fps
+    camera is downsampled to 30). Should match the intended (regularized) save
+    rate so playback speed is correct. Ignored unless camera_triggered."""
 
 
 # ---------------------------------------------------------------------------
@@ -227,17 +258,31 @@ class GrootDataCollector:
         sonic_data_zmq_port: int = 5556,
         state_zmq_host: str = "localhost",
         state_zmq_port: int = 5557,
+        decode_reduce_factor: int = 1,
+        camera_triggered: bool = False,
+        dataset_fps: int = 30,
     ):
         self.text_to_speech = text_to_speech
         self.frequency = frequency
         self.loop_period = 1.0 / frequency
+
+        # Camera-triggered mode: save one frame per NEW camera frame, rate-limited
+        # to `dataset_fps` on a real-time grid. See _camera_trigger_ready().
+        self.camera_triggered = camera_triggered
+        self.dataset_fps = dataset_fps
+        self._save_period = 1.0 / dataset_fps
+        self._last_camera_ts = None
+        self._next_save_time = None
+        self._episode_saved_frames = 0
         self.data_exporter = data_exporter
         self.robot_model = robot_model
 
         self._episode_state = EpisodeState()
         self._keyboard_listener = ZMQKeyboardSubscriber()
 
-        self._image_subscriber = ComposedCameraClientSensor(server_ip=camera_host, port=camera_port)
+        self._image_subscriber = ComposedCameraClientSensor(
+            server_ip=camera_host, port=camera_port, decode_reduce_factor=decode_reduce_factor
+        )
 
         self.obs_act_buffer = deque(maxlen=100)
         self.latest_image_msg = None
@@ -281,6 +326,8 @@ class GrootDataCollector:
 
         self._last_latency_log_time = 0.0
         self._initial_yaw = None
+        self._ready_logged = False
+        self._episode_start_time: float | None = None
 
         print(f"Recording to {self.data_exporter.meta.root}")
 
@@ -320,6 +367,12 @@ class GrootDataCollector:
             self._episode_state.change_state()
             if self._episode_state.get_state() == self._episode_state.RECORDING:
                 self._initial_yaw = None
+                self._episode_start_time = time.monotonic()
+                # Fresh camera-trigger grid for this episode (first frame saves
+                # immediately; the 30Hz downsample restarts from now).
+                self._last_camera_ts = None
+                self._next_save_time = None
+                self._episode_saved_frames = 0
                 self._print_and_say(
                     f"Started recording {self.current_episode_index}", blocking=False
                 )
@@ -535,7 +588,28 @@ class GrootDataCollector:
                         f"Required image '{image_key}' for feature '{feature_name}' "
                         f"not found in image message. Available: {list(images.keys())}"
                     )
-                frame_data[feature_name] = images[image_key]
+                expected_h, expected_w = feature_info["shape"][0], feature_info["shape"][1]
+                image = images[image_key]
+                # 진단(카메라별 1회): 리사이즈 입력 해상도/연속성 확인. ego_view가
+                # (540,960)이면 reduce=2 적용됨, (1080,1920)이면 reduce 미적용(=병목 진범).
+                if not hasattr(self, "_shape_logged"):
+                    self._shape_logged = set()
+                if image_key not in self._shape_logged:
+                    self._shape_logged.add(image_key)
+                    print(f"[shape] {image_key}: 입력 {image.shape} dtype={image.dtype} "
+                          f"C_contig={image.flags['C_CONTIGUOUS']} → 목표 ({expected_h},{expected_w}) "
+                          f"| cv2_threads={cv2.getNumThreads()}",
+                          flush=True)
+                # 계측: 카메라별 리사이즈 시간을 rsz_<key>로 기록. ego_view만 실제
+                # resize(960x540→640x480)라 비용이 크고, 손목은 이미 640x480이라 ~0.
+                with self.telemetry.timer(f"rsz_{image_key}"):
+                    if image.shape[0] != expected_h or image.shape[1] != expected_w:
+                        image = cv2.resize(image, (expected_w, expected_h), interpolation=cv2.INTER_AREA)
+                assert image.shape == (expected_h, expected_w, 3), (
+                    f"Unexpected shape after resize for '{feature_name}': {image.shape}, "
+                    f"expected ({expected_h}, {expected_w}, 3)"
+                )
+                frame_data[feature_name] = image
 
     def _finalize_frame(self, t_start: float) -> bool:
         t_end = time.monotonic()
@@ -545,6 +619,14 @@ class GrootDataCollector:
         if self._episode_state.get_state() == self._episode_state.NEED_TO_SAVE:
             buffer_size = self.data_exporter.episode_buffer.get("size", 0)
             if buffer_size > 0:
+                if self._episode_start_time is not None:
+                    elapsed = time.monotonic() - self._episode_start_time
+                    achieved = buffer_size / elapsed if elapsed > 0 else 0.0
+                    print(
+                        f"[DataExporter] episode: {buffer_size} frames in {elapsed:.1f}s "
+                        f"= {achieved:.1f} Hz actual save rate (dataset fps stamped: "
+                        f"{self.data_exporter.fps}). speedup vs real = {achieved / self.data_exporter.fps:.2f}x"
+                    )
                 self.data_exporter.save_episode()
                 self.sonic_timing_monitor.reset()
                 self._initial_yaw = None
@@ -566,37 +648,89 @@ class GrootDataCollector:
             )
             return False
 
+        if not self._ready_logged:
+            self._ready_logged = True
+            proprio_keys = sorted(self.latest_proprio_msg.keys())
+            image_keys = sorted(self.latest_image_msg.get("images", {}).keys())
+            print(
+                "[DataExporter] proprio + image both ready. "
+                f"proprio keys: {proprio_keys} | image keys: {image_keys}"
+            )
+
         if self._episode_state.get_state() != self._episode_state.RECORDING:
             return self._finalize_frame(t_start)
 
+        # In camera-triggered mode, only build+save on a NEW camera frame that
+        # also passes the real-time rate limiter; otherwise keep state fresh and
+        # skip this iteration (no duplicate frames, no over-sampling).
+        if self.camera_triggered and not self._camera_trigger_ready():
+            return True
+
         return self._add_data_frame_sonic(t_start)
+
+    def _current_camera_ts(self):
+        """Server-stamped capture time of the latest camera frame (ego_view).
+
+        Changes only when a genuinely new frame arrives (stale reads reuse the
+        same value), so it doubles as the new-frame detector.
+        """
+        if self.latest_image_msg is None:
+            return None
+        timestamps = self.latest_image_msg.get("timestamps", {})
+        if "ego_view" in timestamps:
+            return timestamps["ego_view"]
+        return next(iter(timestamps.values()), None)
+
+    def _camera_trigger_ready(self) -> bool:
+        """True iff the current camera frame is NEW and due on the 30Hz grid."""
+        ts = self._current_camera_ts()
+        if ts is None or ts == self._last_camera_ts:
+            return False  # no frame yet, or a stale/duplicate read
+
+        # New frame — mark it seen regardless of whether we keep it.
+        self._last_camera_ts = ts
+
+        now = time.monotonic()
+        if self._next_save_time is None:
+            self._next_save_time = now
+        if now < self._next_save_time:
+            return False  # arrived before its grid slot -> downsample (drop)
+
+        # Accept. Advance the grid by a fixed period (do NOT reset to `now`, or a
+        # 36fps stream would collapse to 18fps). Clamp so a camera stall can't
+        # trigger a catch-up burst of saves once frames resume.
+        self._next_save_time = max(self._next_save_time + self._save_period, now - self._save_period)
+        return True
 
     def _add_data_frame_sonic(self, t_start: float) -> bool:
         """Build one data frame in Sonic CPP + SMPL mode."""
         assert self.latest_proprio_msg is not None
         proprio = self.latest_proprio_msg
 
-        whole_q = self.robot_model.get_configuration_from_actuated_joints(
-            body_actuated_joint_values=proprio["body_q"],
-            left_hand_actuated_joint_values=proprio["left_hand_q"],
-            right_hand_actuated_joint_values=proprio["right_hand_q"],
-        )
-        whole_action_wbc = self.robot_model.get_configuration_from_actuated_joints(
-            body_actuated_joint_values=proprio["last_action"],
-            left_hand_actuated_joint_values=proprio["last_left_hand_action"],
-            right_hand_actuated_joint_values=proprio["last_right_hand_action"],
-        )
-
-        self.robot_model.cache_forward_kinematics(whole_q)
-        eef_parts = []
-        for side in ["left", "right"]:
-            placement = self.robot_model.frame_placement(
-                self.robot_model.supplemental_info.hand_frame_names[side]
+        # Fine-grained split of the ~60ms add_frame compute to localize the live
+        # stall: robot forward-kinematics vs pose-feature build vs image resize.
+        with self.telemetry.timer("af_fk"):
+            whole_q = self.robot_model.get_configuration_from_actuated_joints(
+                body_actuated_joint_values=proprio["body_q"],
+                left_hand_actuated_joint_values=proprio["left_hand_q"],
+                right_hand_actuated_joint_values=proprio["right_hand_q"],
             )
-            pos = placement.translation[:3]
-            quat = R.from_matrix(placement.rotation).as_quat(scalar_first=True)
-            eef_parts.append(np.concatenate([pos, quat]))
-        observation_eef_state = np.concatenate(eef_parts)
+            whole_action_wbc = self.robot_model.get_configuration_from_actuated_joints(
+                body_actuated_joint_values=proprio["last_action"],
+                left_hand_actuated_joint_values=proprio["last_left_hand_action"],
+                right_hand_actuated_joint_values=proprio["last_right_hand_action"],
+            )
+
+            self.robot_model.cache_forward_kinematics(whole_q)
+            eef_parts = []
+            for side in ["left", "right"]:
+                placement = self.robot_model.frame_placement(
+                    self.robot_model.supplemental_info.hand_frame_names[side]
+                )
+                pos = placement.translation[:3]
+                quat = R.from_matrix(placement.rotation).as_quat(scalar_first=True)
+                eef_parts.append(np.concatenate([pos, quat]))
+            observation_eef_state = np.concatenate(eef_parts)
 
         frame_data: dict = {
             "observation.state": whole_q,
@@ -606,13 +740,28 @@ class GrootDataCollector:
 
         self._add_cpp_state_features(frame_data, proprio)
 
-        sonic_latency_ms = self._add_sonic_pose_features(frame_data)
+        with self.telemetry.timer("af_pose"):
+            sonic_latency_ms = self._add_sonic_pose_features(frame_data)
 
-        self._add_images_to_frame_data(frame_data)
+        with self.telemetry.timer("af_img"):
+            self._add_images_to_frame_data(frame_data)
 
         self._log_latency_periodic(sonic_latency_ms)
 
-        self.data_exporter.add_frame(frame_data)
+        # Camera-triggered mode intentionally omits a real timestamp so the
+        # exporter falls back to the uniform frame_index/fps grid — that keeps the
+        # mp4/info.json fps honest and lets check_timestamps_sync pass. The
+        # free-running mode keeps the real (option-a) monotonic timestamp.
+        if not self.camera_triggered:
+            frame_data["timestamp"] = np.array(
+                [time.monotonic() - self._episode_start_time], dtype=np.float32
+            )
+
+        # Split out the exporter/video-writer cost from the compute above so the
+        # timing breakdown shows whether the per-frame stall is in the video
+        # queue (encoder-bound) or in the ZMQ/compute path (contention-bound).
+        with self.telemetry.timer("export_add_frame"):
+            self.data_exporter.add_frame(frame_data)
         return self._finalize_frame(t_start)
 
     def _add_cpp_state_features(self, frame_data: dict, proprio: dict) -> None:
@@ -828,6 +977,43 @@ class GrootDataCollector:
         )
         return quat_to_rot6d(target_quat)
 
+    def _log_crash_context(self, stage: str) -> None:
+        """Print rich diagnostic context + traceback when the run loop crashes."""
+        print("=" * 70)
+        print(f"[DataExporter] CRASH during '{stage}' stage")
+        print(f"  episode_state: {self._episode_state.get_state()}")
+        print(f"  stream_mode: {self.current_stream_mode}")
+
+        if self.latest_proprio_msg is not None:
+            print("  proprio (g1_debug) fields:")
+            for k, v in self.latest_proprio_msg.items():
+                if isinstance(v, np.ndarray):
+                    print(f"    {k}: shape={v.shape} dtype={v.dtype}")
+                else:
+                    print(f"    {k}: {type(v).__name__} = {v!r}")
+        else:
+            print("  proprio (g1_debug): None (never received)")
+
+        if self.latest_sonic_msg is not None:
+            print(f"  latest_sonic_msg keys: {list(self.latest_sonic_msg.keys())}")
+        else:
+            print("  latest_sonic_msg: None")
+
+        if self.latest_planner_msg is not None:
+            print(f"  latest_planner_msg keys: {list(self.latest_planner_msg.keys())}")
+
+        if self.latest_image_msg is not None:
+            print(
+                f"  latest_image_msg image keys: "
+                f"{list(self.latest_image_msg.get('images', {}).keys())}"
+            )
+        else:
+            print("  latest_image_msg: None")
+
+        print("  --- traceback ---")
+        print(traceback.format_exc())
+        print("=" * 70)
+
     def save_and_cleanup(self):
         try:
             self._print_and_say("saving episode done", blocking=False)
@@ -839,6 +1025,20 @@ class GrootDataCollector:
             )
         except Exception as e:
             self._print_and_say(f"Error saving episode: {e}", blocking=True)
+
+        # save_episode() pre-allocates a fresh (empty) video writer for the next
+        # episode, which opens a 0-byte mp4 immediately. On shutdown that file is
+        # an orphan (no parquet/meta entry). Cancel the writers when the current
+        # buffer holds no real frames so no broken 0-byte mp4 is left behind.
+        try:
+            if self.data_exporter.episode_buffer.get("size", 0) == 0:
+                for writer in self.data_exporter.video_writers.values():
+                    try:
+                        writer.cancel()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
         try:
             self._state_subscriber.close()
@@ -863,25 +1063,39 @@ class GrootDataCollector:
         try:
             while True:
                 t_start = time.monotonic()
-                with self.telemetry.timer("total_loop"):
-                    with self.telemetry.timer("poll_state"):
-                        self._poll_state_zmq()
+                stage = "poll_state"
+                try:
+                    with self.telemetry.timer("total_loop"):
+                        with self.telemetry.timer("poll_state"):
+                            stage = "poll_state"
+                            self._poll_state_zmq()
 
-                    with self.telemetry.timer("poll_sonic"):
-                        self._poll_sonic_zmq_messages()
+                        with self.telemetry.timer("poll_sonic"):
+                            stage = "poll_sonic"
+                            self._poll_sonic_zmq_messages()
 
-                    with self.telemetry.timer("poll_image"):
-                        img_msg = self._image_subscriber.read()
-                        if img_msg is not None:
-                            self.latest_image_msg = img_msg
+                        with self.telemetry.timer("poll_image"):
+                            stage = "poll_image"
+                            img_msg = self._image_subscriber.read()
+                            if img_msg is not None:
+                                self.latest_image_msg = img_msg
+                                # 계측: 방금 read()가 채운 카메라별 JPEG 디코드 시간을
+                                # telemetry에 dec_<key>로 기록(Moving Averages에 자동 표시).
+                                for _dk, _ds in LAST_DECODE_MS.items():
+                                    self.telemetry.record_value(f"dec_{_dk}", _ds)
 
-                    with self.telemetry.timer("add_frame"):
-                        self._add_data_frame()
+                        with self.telemetry.timer("add_frame"):
+                            stage = "add_frame"
+                            self._add_data_frame()
 
-                    with self.telemetry.timer("check_recording_commands"):
-                        self._check_recording_commands()
+                        with self.telemetry.timer("check_recording_commands"):
+                            stage = "check_recording_commands"
+                            self._check_recording_commands()
 
-                    end_time = time.monotonic()
+                        end_time = time.monotonic()
+                except Exception:
+                    self._log_crash_context(stage)
+                    raise
 
                 elapsed = time.monotonic() - t_start
                 sleep_time = self.loop_period - elapsed
@@ -909,6 +1123,11 @@ class GrootDataCollector:
 
 
 def main(config: SonicDataExporterConfig):
+    if config.cv2_num_threads > 0:
+        # Avoid OpenCV oversubscribing all cores against the other 4 processes.
+        cv2.setNumThreads(config.cv2_num_threads)
+        print(f"[cv2] thread pool capped at {config.cv2_num_threads}")
+
     g1_rm = get_g1_robot_model()
 
     dataset_features = get_features_sonic_vla(g1_rm)
@@ -930,13 +1149,19 @@ def main(config: SonicDataExporterConfig):
         config.state_zmq_host, config.state_zmq_port, config.robot_config_timeout
     )
 
+    # When camera-triggered, the dataset fps is the (downsampled) camera rate,
+    # decoupled from the loop poll rate (data_collection_frequency) which stays
+    # high to keep the proprio/pose snapshots fresh between camera frames.
+    dataset_fps = config.dataset_fps if config.camera_triggered else config.data_collection_frequency
+
     data_exporter = Gr00tDataExporter.create(
         save_root=f"{config.root_output_dir}/{config.dataset_name}",
-        fps=config.data_collection_frequency,
+        fps=dataset_fps,
         features=dataset_features,
         modality_config=modality_config,
         task=config.task_prompt,
         script_config={**robot_config, "record_wrist_cameras": config.record_wrist_cameras},
+        use_nvenc=config.use_nvenc,
     )
 
     data_collector = GrootDataCollector(
@@ -950,6 +1175,12 @@ def main(config: SonicDataExporterConfig):
         sonic_data_zmq_port=config.sonic_zmq_port,
         state_zmq_host=config.state_zmq_host,
         state_zmq_port=config.state_zmq_port,
+        # per-camera reduce: ego_view(1080p)만 reduce로 이득(무손실). 손목(640x480)은
+        # reduce하면 320x240 업스케일 블러라 1(원본)로 둔다. dict 미지정 키는 deserialize
+        # 에서 기본 1. → 손목 화질 보존 + ego_view 속도 이득 동시 확보.
+        decode_reduce_factor={"ego_view": config.camera_decode_reduce},
+        camera_triggered=config.camera_triggered,
+        dataset_fps=dataset_fps,
     )
     data_collector.run()
 

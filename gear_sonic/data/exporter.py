@@ -187,6 +187,7 @@ class Gr00tDataExporter(LeRobotDataset):
         tolerance_s: float = 1e-4,
         vcodec: str = "h264",
         overwrite_existing: bool = False,
+        use_nvenc: bool = False,
     ) -> "Gr00tDataExporter":
         if script_config is None:
             script_config = {}
@@ -230,6 +231,7 @@ class Gr00tDataExporter(LeRobotDataset):
         obj.tolerance_s = tolerance_s
         obj.video_backend = "pyav"
         obj.vcodec = vcodec
+        obj.use_nvenc = use_nvenc
         obj.task = task
         obj.image_writer = None
 
@@ -245,9 +247,19 @@ class Gr00tDataExporter(LeRobotDataset):
         return obj
 
     def create_video_writer(self) -> dict[str, VideoWriter]:
+        # Select the encoder backend. NVENC path (hardware h264 via system
+        # ffmpeg) is opt-in via `use_nvenc`; default keeps the original PyAV
+        # software VideoWriter untouched for easy revert.
+        if getattr(self, "use_nvenc", False):
+            from gear_sonic.data.video_writer_nvenc import NvencVideoWriter
+
+            writer_cls = NvencVideoWriter
+        else:
+            writer_cls = VideoWriter
+
         video_writers = {}
         for key in self.meta.video_keys:
-            video_writers[key] = VideoWriter(
+            video_writers[key] = writer_cls(
                 self.root
                 / self.meta.get_video_file_path(self.episode_buffer["episode_index"], key),
                 self.meta.shapes[key][1],
@@ -273,6 +285,12 @@ class Gr00tDataExporter(LeRobotDataset):
 
         frame_index = self.episode_buffer["size"]
         timestamp = frame.pop("timestamp") if "timestamp" in frame else frame_index / self.fps
+        # Normalize to a scalar so the stacked timestamp buffer ends up (N,) —
+        # matches episode_indices for check_timestamps_sync. A real per-frame
+        # timestamp is passed in as a float32 array of shape (1,) (to satisfy
+        # validate_frame's schema), which would otherwise stack to (N, 1).
+        if isinstance(timestamp, np.ndarray):
+            timestamp = float(timestamp.reshape(-1)[0])
         self.episode_buffer["frame_index"].append(frame_index)
         self.episode_buffer["timestamp"].append(timestamp)
 

@@ -1,0 +1,118 @@
+# =============================================================================
+# park-camera-server:0.1-rgb
+#
+# Intel RealSense D435i 컬러 스트림 캡처 → ZMQ port 5555 publish
+# Target: Unitree G1 Orin NX (JetPack R35.3.1 = Ubuntu 20.04, aarch64)
+#
+# 이미지명:   park-camera-server:0.1-rgb
+# 컨테이너명: park-camera-server
+# =============================================================================
+#
+# [Build] (Orin NX에서, GR00T-WholeBodyControl/ 루트)
+#   docker build -f docker/Dockerfile.camera_server \
+#                -t park-camera-server:0.1-rgb .
+#
+# [Run - 정식]
+#   docker run --rm \
+#     --name park-camera-server \
+#     --network host \
+#     --device=/dev/bus/usb:/dev/bus/usb \
+#     park-camera-server:0.1-rgb
+#
+# [Run - 소스 override, 개발용 (gear_sonic 수정 즉시 반영)]
+#   docker run --rm \
+#     --name park-camera-server \
+#     --network host \
+#     --device=/dev/bus/usb:/dev/bus/usb \
+#     -v $(pwd)/gear_sonic:/app/gear_sonic:ro \
+#     park-camera-server:0.1-rgb
+#
+# [Rollback]
+#   docker rmi park-camera-server:0.1-rgb
+#
+# [l4t-base pull 실패 시 fallback]
+#   FROM ubuntu:20.04  # 아래 줄과 교체 (동일 Ubuntu 20.04 base)
+# =============================================================================
+
+# 1순위: 호스트 JetPack R35.3.1과 정확히 매칭되는 베이스
+# 카메라 서버는 CUDA 불필요 → GPU 관련 레이어 활용 안 하지만,
+# Ubuntu 20.04 시스템 라이브러리 ABI 호환성 보장을 위해 사용.
+FROM nvcr.io/nvidia/l4t-base:r35.3.1
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# ── 1. 기반 유틸리티 + Python 3.10 ──────────────────────────────────────────
+# Ubuntu 20.04 기본 Python = 3.8.  gear_sonic requires-python ≥ 3.10.
+# deadsnakes PPA로 Python 3.10 추가.
+# python3.10-dev: pyrealsense2 소스 빌드 fallback 시 헤더 필요.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        software-properties-common \
+        curl \
+        gnupg \
+        ca-certificates \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        python3.10 \
+        python3.10-dev \
+        python3.10-distutils \
+        libgl1 \
+        libglib2.0-0 \
+        libgomp1 \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10 \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── 2. Intel RealSense C++ SDK (컨테이너 독립 설치) ─────────────────────────
+# 호스트의 librealsense2 2.56.5와 독립적으로 컨테이너 안에 별도 설치.
+# librealsense2     : 런타임 (D435i USB 통신 C++ 라이브러리)
+# librealsense2-dev : 헤더 포함 — pyrealsense2 PyPI wheel이 없을 때
+#                     소스 빌드 fallback을 위해 포함.
+RUN mkdir -p /etc/apt/keyrings \
+    && curl -sSf https://librealsense.intel.com/Debian/librealsense.pgp \
+       | gpg --dearmor -o /etc/apt/keyrings/librealsense.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/librealsense.gpg arch=arm64] \
+https://librealsense.intel.com/Debian/apt-repo focal main" \
+       > /etc/apt/sources.list.d/librealsense.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        librealsense2 \
+        librealsense2-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── 3. Python 패키지 ──────────────────────────────────────────────────────────
+# pyrealsense2: PyPI manylinux_aarch64+cp310 wheel 존재 시 즉시 설치 (~1분).
+#               wheel 없으면 librealsense2-dev 헤더로 소스 빌드 (~30~60분).
+#               → 트러블슈팅 참조.
+# 제외: depthai   (OAK 카메라 전용 — D435i 불필요)
+#       requests  (HTTP MJPEG 경로 미사용)
+#       scipy/pin (gear_sonic 코어 의존 — 카메라 서버 불필요)
+# opencv-python-headless: GUI 없는 서버 전용 (libgl 의존 최소화)
+RUN python3.10 -m pip install --no-cache-dir \
+    "numpy==1.26.4" \
+    "pyzmq" \
+    "msgpack" \
+    "msgpack-numpy" \
+    "opencv-python-headless" \
+    "tyro" \
+    "pyrealsense2"
+
+# ── 4. gear_sonic.camera 모듈 복사 ───────────────────────────────────────────
+# gear_sonic/__init__.py: 빈 파일 확인됨 — torch 등 heavy dep 없이 동작.
+# gear_sonic/camera/: composed_camera.py + drivers/realsense.py 등.
+#
+# 런타임에 -v $(pwd)/gear_sonic:/app/gear_sonic:ro 로 소스 override 가능.
+WORKDIR /app
+COPY gear_sonic/__init__.py gear_sonic/__init__.py
+COPY gear_sonic/camera/    gear_sonic/camera/
+
+ENV PYTHONPATH=/app
+
+EXPOSE 5555
+
+# [주의 1] realsense.py는 color + depth 스트림을 동시에 활성화 (하드코딩).
+#           depth는 data exporter feature schema에 없으면 자동 무시됨.
+# [주의 2] composed_camera.py:379에서 device_id가 RealSenseSensor에 미전달.
+#           --ego-view-device-id는 현재 코드에서 실제 사용 안 됨.
+#           D435i 1대 단독 환경이므로 device index=0 자동 선택 → 무해.
+CMD ["python3.10", "-m", "gear_sonic.camera.composed_camera", \
+     "--ego-view-camera", "realsense", \
+     "--ego-view-device-id", "243122075858", \
+     "--port", "5555"]

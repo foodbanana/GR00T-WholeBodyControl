@@ -1,6 +1,7 @@
 """ZMQ PUB/SUB transport and image serialisation for the camera server."""
 
 import base64
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -102,6 +103,12 @@ class PoseMessageSchema:
 # =============================================================================
 # Image Message Schema
 # =============================================================================
+# 계측용: deserialize가 매 호출마다 카메라별 JPEG 디코드 소요시간(초)을 여기 채운다.
+# 소비자(run_data_exporter)가 poll_image 직후 읽어 telemetry에 dec_<key>로 기록.
+# perf_counter 2회/이미지라 오버헤드 무시 가능(디코드 수 ms 대비 ~µs).
+LAST_DECODE_MS: dict[str, float] = {}
+
+
 @dataclass
 class ImageMessageSchema:
     """Standardized message schema for camera images.
@@ -125,13 +132,40 @@ class ImageMessageSchema:
         return serialized_msg
 
     @staticmethod
-    def deserialize(data: dict[str, Any]) -> "ImageMessageSchema":
+    def deserialize(data: dict[str, Any], reduce_factor: "int | dict" = 1) -> "ImageMessageSchema":
+        # reduce_factor 2/4 uses libjpeg's scaled decode (IMREAD_REDUCED_COLOR_*)
+        # to decode JPEGs directly at 1/2 or 1/4 resolution — much cheaper than a
+        # full decode + downscale. Only safe for consumers that then resize down
+        # (e.g. the data exporter's 640x480 target); the viewer keeps full res.
+        #
+        # reduce_factor는 int(모든 카메라 동일) 또는 dict{key: factor}(카메라별)를 받는다.
+        # ego_view(1080p)는 2로 줄여도 960x540 ≥ 480p라 무손실이지만, 손목(640x480)은
+        # 2로 줄이면 320x240으로 반토막→업스케일 블러가 되므로, exporter가
+        # {"ego_view":2, "*_wrist":1} 같은 dict로 카메라별 factor를 넘긴다.
+        _FLAG = {
+            1: cv2.IMREAD_COLOR,
+            2: cv2.IMREAD_REDUCED_COLOR_2,
+            4: cv2.IMREAD_REDUCED_COLOR_4,
+        }
         timestamps = data.get("timestamps", {})
         images = {}
         for key, value in data.get("images", {}).items():
             if isinstance(value, bytes | bytearray):
-                mat = cv2.imdecode(np.frombuffer(value, dtype=np.uint8), cv2.IMREAD_COLOR)
-                images[key] = mat[..., ::-1]  # BGR -> RGB
+                _rf = reduce_factor.get(key, 1) if isinstance(reduce_factor, dict) else reduce_factor
+                _flag = _FLAG.get(_rf, cv2.IMREAD_COLOR)
+                _t0 = time.perf_counter()
+                mat = cv2.imdecode(np.frombuffer(value, dtype=np.uint8), _flag)
+                if mat is None:
+                    raise ValueError(
+                        f"cv2.imdecode failed for image key '{key}': "
+                        f"{len(value)} bytes could not be decoded as JPEG "
+                        f"(first 16 bytes: {bytes(value[:16]).hex()})"
+                    )
+                # BGR -> RGB. mat[..., ::-1]는 음수 stride(비연속) 뷰라 이후
+                # cv2.resize가 비정상적으로 느려진다(측정: rsz_ego ~20ms). cvtColor는
+                # 연속 배열을 반환해 resize가 정상 속도(~2ms)로 돈다.
+                images[key] = cv2.cvtColor(mat, cv2.COLOR_BGR2RGB)
+                LAST_DECODE_MS[key] = time.perf_counter() - _t0  # 계측(초)
             elif isinstance(value, str):
                 images[key] = ImageUtils.decode_image(value)
             elif isinstance(value, np.ndarray):

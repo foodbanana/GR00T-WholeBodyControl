@@ -1,0 +1,17 @@
+#!/bin/bash
+# Wrapper to run the MuJoCo sim loop (Terminal 1) with a CycloneDDS config
+# that restricts the Python cyclonedds backend to the loopback interface.
+#
+# Scope: .venv_sim only. Does not touch gear_sonic_deploy/ or
+# thirdparty/unitree_sdk2/, and has no effect on deploy.sh (C++ binary
+# uses a separate prebuilt libddsc.so).
+set -e
+
+REPO_ROOT="$HOME/GR00T-WholeBodyControl"
+
+export CYCLONEDDS_URI="file://$HOME/.config/cyclonedds/sim_lo_only.xml"
+
+source "$REPO_ROOT/.venv_sim/bin/activate"
+cd "$REPO_ROOT"
+
+python -X faulthandler gear_sonic/scripts/run_sim_loop.py "$@"

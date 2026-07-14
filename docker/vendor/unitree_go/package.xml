@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>unitree_go</name>
+  <version>0.0.1</version>
+  <description>
+    Minimal unitree_go message package for ltw-camera-server (0.5-foxy-planB).
+
+    Contains only the message definitions actually needed by our container:
+    Go2FrontVideoData, matching the topic /frontvideostream published by
+    videohub_pc4 (system service running on the host as root).
+
+    Field definitions copied verbatim from the host's production tree at
+    /upgradePythonServer/temp/unitree/module/graph_pid_ws/src/unitree_go/msg/
+    so wire format (DDSI-RTPS) matches the publisher automatically — DDS
+    guarantees wire compatibility when field definitions match, regardless
+    of the language or CMakeLists.txt used to generate typesupport.
+
+    To add more messages later (depth, IMU, etc.): copy the corresponding
+    .msg file from the host tree into msg/ and add a line to CMakeLists.txt.
+
+    Not affiliated with Unitree Robotics.
+  </description>
+  <maintainer email="none@none.invalid">ltw-camera-server</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+
+  <exec_depend>rosidl_default_runtime</exec_depend>
+
+  <member_of_group>rosidl_interface_packages</member_of_group>
+</package>

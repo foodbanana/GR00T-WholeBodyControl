@@ -1,0 +1,216 @@
+# =============================================================================
+# ltw-camera-server:0.3-ros2
+#
+# Unitree G1 head(ego-view) 카메라 프레임을, PC2(Orin NX)의 videohub_pc4가
+# ROS 2 topic(/frontvideostream)으로 publish 중인 프레임을 rclpy로
+# subscribe해서 그대로 ZMQ port 5555로 forward.
+#
+# Target: Unitree G1 Orin NX (PC2, eth0 192.168.123.164/24, aarch64,
+#         호스트 OS Ubuntu 20.04 / JetPack R35.3.1, 호스트 ROS 2: Foxy)
+#
+# 이미지명:   ltw-camera-server:0.3-ros2
+# 컨테이너명: ltw-camera-server-ros2
+# =============================================================================
+#
+# [배경] docker/Dockerfile.ltw_camera_server_dds (0.2-dds, unitree_sdk2py의
+# raw ChannelSubscriber로 "rt/frontvideostream" subscribe)는 콜백이 한 번도
+# 호출되지 않아 실패. tcpdump로는 multicast 패킷이 컨테이너까지 도달함을
+# 확인했으나 CycloneDDS가 조용히 무시함. 원인은 /frontvideostream이 raw DDS
+# topic이 아니라 ROS 2 topic(rclpy/rclcpp 발행)이었기 때문 — raw DDS reader는
+# ROS 2 RMW의 encapsulation header/QoS profile을 이해하지 못해 discovery
+# 자체가 안 됨. 이 파일은 그 대안으로 rclpy를 사용해 ROS 2 방식 그대로
+# subscribe한다. Dockerfile.ltw_camera_server_dds / unitree_dds.py는 참고용
+# 보존, 수정하지 않음.
+#
+# [Build] (Orin NX에서, GR00T-WholeBodyControl/ 루트에서)
+#   docker build -f docker/Dockerfile.ltw_camera_server_ros2 \
+#                -t ltw-camera-server:0.3-ros2 .
+#
+# [Run — USB/디바이스 마운트 불필요, --network host 필요 (ROS 2/DDS discovery)]
+#   docker run --rm \
+#     --name ltw-camera-server-ros2 \
+#     --network host \
+#     ltw-camera-server:0.3-ros2
+#
+# [Run - 소스 override, 개발용]
+#   docker run --rm \
+#     --name ltw-camera-server-ros2 \
+#     --network host \
+#     -v $(pwd)/gear_sonic:/app/gear_sonic:ro \
+#     ltw-camera-server:0.3-ros2
+#
+# [Rollback]
+#   docker rm -f ltw-camera-server-ros2 2>/dev/null; docker rmi ltw-camera-server:0.3-ros2
+# =============================================================================
+
+# ros:foxy-ros-base는 Ubuntu 20.04(focal) 기반 — 호스트 OS(Ubuntu 20.04)와
+# 일치하고, ROS 2 Foxy apt 패키지도 focal용으로만 배포되므로 이 이미지가
+# ubuntu:22.04 등을 쓰는 것보다 안전함. 이 이미지 자체에 rmw_cyclonedds_cpp가
+# 포함돼 있지 않을 수 있어 아래 섹션 2에서 명시적으로 추가 설치함.
+# (대안: FROM ubuntu:20.04 후 ROS 2 apt repo/key를 수동 등록하는 방법도
+# 있으나, 공식 ros:foxy-ros-base가 이미 존재하므로 그 수고를 피하기 위해
+# 이 이미지를 기본으로 선택함.)
+FROM ros:foxy-ros-base
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=en_US.UTF-8
+ENV LC_ALL=en_US.UTF-8
+ENV ROS_DISTRO=foxy
+# Foxy 기본 RMW는 rmw_fastrtps_cpp — 호스트(cyclonedds__noshm 0.10.2)와
+# discovery가 안 됨. 반드시 rmw_cyclonedds_cpp로 고정.
+ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+
+SHELL ["/bin/bash", "-c"]
+
+# -----------------------------------------------------------------------------
+# 1. Base tools + locale
+# -----------------------------------------------------------------------------
+# build-essential + cmake: CycloneDDS C 라이브러리 소스 빌드용 (섹션 3).
+# python3-numpy: 일부 rosidl 생성 Python 바인딩이 빌드/임포트 시점에 참조.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        locales \
+        curl \
+        gnupg \
+        ca-certificates \
+        git \
+        build-essential \
+        cmake \
+        pkg-config \
+        python3-pip \
+        python3-dev \
+        python3-numpy \
+    && locale-gen en_US.UTF-8 \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# 2. ROS 2 Foxy 추가 패키지 (base 이미지에 없는 것)
+# -----------------------------------------------------------------------------
+# rmw_cyclonedds is required to match host RMW; ROS 2 Foxy default is
+# rmw_fastrtps which won't discover host DDS participants.
+# ros-foxy-cyclonedds provides rosidl_generator_dds_idl CMake config,
+# required by unitree_go message package build.
+# ros-foxy-rosidl-generator-dds-idl provides rosidl_generator_dds_idlConfig.cmake,
+# required by unitree_go message package colcon build (verified via apt-cache search).
+# python3-colcon-common-extensions: unitree_go 메시지 패키지 소스 빌드용.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ros-foxy-rmw-cyclonedds-cpp \
+        ros-foxy-cyclonedds \
+        ros-foxy-rosidl-generator-dds-idl \
+        python3-colcon-common-extensions \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# 3. CycloneDDS C library 0.10.2 소스 빌드 (ENABLE_SHM=OFF, 호스트 매칭)
+# -----------------------------------------------------------------------------
+# 호스트 libddsc.so.0가 0.10.2 __noshm 빌드(SHM 비활성화). wire protocol
+# 매칭 필수 — 과거 이 프로젝트에서 0.10.5로 시도했다가 크래시는 없어졌지만
+# G1이 밸런스를 잃고 발산한 사고 이력이 있음(다른 컴포넌트, DGX Spark
+# sim2sim 작업 당시). ENABLE_SHM=OFF도 호스트 빌드와 반드시 일치해야 함 —
+# 하나만 SHM을 쓰면 서로의 shared-memory 전송 경로를 못 찾아 마찬가지로
+# discovery가 조용히 실패할 수 있음.
+RUN git clone --depth 1 -b 0.10.2 https://github.com/eclipse-cyclonedds/cyclonedds.git /tmp/cyclonedds \
+    && cmake -S /tmp/cyclonedds -B /tmp/cyclonedds/build \
+        -DCMAKE_INSTALL_PREFIX=/opt/cyclonedds/install \
+        -DBUILD_EXAMPLES=OFF \
+        -DBUILD_TESTING=OFF \
+        -DENABLE_SHM=OFF \
+    && cmake --build /tmp/cyclonedds/build --target install -- -j"$(nproc)" \
+    && rm -rf /tmp/cyclonedds
+
+ENV CYCLONEDDS_HOME=/opt/cyclonedds/install
+ENV LD_LIBRARY_PATH=/opt/cyclonedds/install/lib:${LD_LIBRARY_PATH}
+ENV PATH=/opt/cyclonedds/install/bin:${PATH}
+
+# -----------------------------------------------------------------------------
+# 4. unitree_go ROS 2 message package 소스 빌드
+# -----------------------------------------------------------------------------
+# unitree_go must be built in the container with the same rosidl toolchain
+# as this container's ROS 2 Foxy so the generated typesupport matches what
+# the host-side publisher expects.
+#
+# Fallback (방법 B): unitree_ros2 저장소 경로/이름이 upstream에서 바뀌었거나
+# 접근 불가하면, external_dependencies/unitree_sdk2_python의 IDL
+# (unitree_go/msg/dds_/_Go2FrontVideoData_.py: time_frame uint64,
+# video720p/360p/180p uint8 sequence)을 참고해 unitree_go/msg/
+# Go2FrontVideoData.msg를 직접 작성한 뒤 동일하게 colcon build로 대체.
+RUN git clone --depth 1 https://github.com/unitreerobotics/unitree_ros2.git /opt/unitree_ros2_src \
+    && source /opt/ros/foxy/setup.bash \
+    && cd /opt/unitree_ros2_src \
+    && colcon build --packages-select unitree_go --install-base /opt/unitree_go_install \
+    && rm -rf /opt/unitree_ros2_src/build /opt/unitree_ros2_src/log
+
+# -----------------------------------------------------------------------------
+# 5. Python 런타임 의존성
+# -----------------------------------------------------------------------------
+# numpy pinned to 1.24.4: last stable numpy version supporting Python 3.8
+# (ros:foxy-ros-base default). Unlike previous Dockerfiles that pinned
+# 1.26.4 for pyrealsense2 arm64 wheel ABI matching, this image doesn't use
+# pyrealsense2, so we simply use the highest numpy compatible with Python 3.8.
+# pyzmq pinned to 25.1.2: pyzmq 27.x has no aarch64+Python3.8 prebuilt
+# wheel on PyPI, falling back to source build which fails on isolated
+# numpy env. 25.1.2 has manylinux_2_17_aarch64 wheel for Python 3.8
+# (verified with dry-run docker install).
+# opencv-python-headless: server mode, no GUI stack — 이 driver는 프레임을
+# 디코딩/재인코딩하지 않고 그대로 통과시키므로 GUI 스택 자체가 불필요.
+RUN python3 -m pip install --no-cache-dir \
+    "numpy==1.24.4" \
+    "pyzmq==25.1.2" \
+    "msgpack" \
+    "msgpack-numpy" \
+    "opencv-python-headless" \
+    "tyro"
+
+# -----------------------------------------------------------------------------
+# 6. gear_sonic camera 모듈만 복사 (전체 레포 아님)
+# -----------------------------------------------------------------------------
+WORKDIR /app
+COPY gear_sonic/__init__.py gear_sonic/__init__.py
+COPY gear_sonic/camera/    gear_sonic/camera/
+
+ENV PYTHONPATH=/app
+ENV CAMERA_PORT=5555
+ENV DDS_NETWORK_INTERFACE=eth0
+
+EXPOSE 5555
+
+# -----------------------------------------------------------------------------
+# 7. 개발 편의 (/root/.bashrc) — 컨테이너에 exec로 들어가 디버깅할 때
+#    ROS 2 / unitree_go / CycloneDDS 환경이 자동으로 잡히도록
+# -----------------------------------------------------------------------------
+RUN { \
+        echo "source /opt/ros/foxy/setup.bash"; \
+        echo "source /opt/unitree_go_install/setup.bash"; \
+        echo "export CYCLONEDDS_HOME=/opt/cyclonedds/install"; \
+        echo "export LD_LIBRARY_PATH=/opt/cyclonedds/install/lib:\${LD_LIBRARY_PATH}"; \
+        echo "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp"; \
+    } >> /root/.bashrc
+
+# -----------------------------------------------------------------------------
+# 8. Runtime notes
+# -----------------------------------------------------------------------------
+# - No USB device passthrough required (no --device, no /dev/bus/usb) — this
+#   image never opens a camera device.
+# - --network host is required for ROS 2/CycloneDDS discovery to see the
+#   host's real network interface (eth0), same reasoning as
+#   Dockerfile.ltw_camera_server_dds.
+# - RMW_IMPLEMENTATION must stay rmw_cyclonedds_cpp. If this silently
+#   reverts to rmw_fastrtps_cpp (e.g. a base-image update, or someone
+#   removing the ENV), discovery with the host will fail exactly like the
+#   raw-DDS attempt did, just for a different reason.
+# - Downstream (workstation run_data_exporter.py) receives raw JPEG bytes
+#   (video720p) exactly as videohub_pc4 published them — no re-encoding
+#   happens anywhere in this container.
+# - Camera ownership: PC1 physically owns the D435i and encodes JPEG; PC2's
+#   videohub_pc4 relays those frames as a ROS 2 topic. This container only
+#   subscribes — it must never attempt to stop/restart videohub_pc4 or open
+#   /dev/video4, which would break other users' access to the same feed.
+# - If UnitreeROS2Sensor still receives no callbacks after all of the
+#   above, check the publisher's actual QoS with
+#   `ros2 topic info /frontvideostream --verbose` before assuming the code
+#   is wrong — a QoS mismatch drops messages silently, same failure mode
+#   as the raw-DDS attempt.
+# - bash (not sh) is required because setup.bash uses the 'source' command,
+#   which is bash-specific (POSIX sh/dash has '.' instead). The SHELL
+#   directive above only affects RUN, not CMD, so CMD must name bash
+#   explicitly.
+CMD ["bash", "-c", "source /opt/ros/foxy/setup.bash && source /opt/unitree_go_install/setup.bash && python3 -m gear_sonic.camera.composed_camera --ego-view-camera unitree_ros2 --port ${CAMERA_PORT} --dds-interface ${DDS_NETWORK_INTERFACE}"]

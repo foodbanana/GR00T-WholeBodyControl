@@ -11,8 +11,12 @@ Usage (on robot)::
         --ego-view-device-id 18443010E1ABC12300 \\
         --port 5555
 
-Supported camera types: ``oak``, ``oak_mono``, ``realsense``,
-``usb``, or a path to an ``.mp4`` file for replay testing.
+Supported camera types: ``oak``, ``oak_mono``, ``realsense``, ``usb``,
+``unitree_dds`` (subscribes to the robot's own DDS video relay instead of
+opening a camera device — see ``gear_sonic/camera/drivers/unitree_dds.py``),
+``unitree_ros2`` (same relay, but subscribed via rclpy/ROS 2 — see
+``gear_sonic/camera/drivers/unitree_ros2.py``), or a path to an ``.mp4``
+file for replay testing.
 
 Run ``python -m gear_sonic.camera.composed_camera --help`` for all options.
 """
@@ -99,6 +103,10 @@ class ComposedCameraConfig:
 
     mjpeg_quality: int = 80
     """MJPEG quality 1-100 (only when use_mjpeg=True)."""
+
+    dds_interface: str = "eth0"
+    """Network interface for the Unitree on-robot DDS video relay
+    (only used when a camera type is ``unitree_dds``)."""
 
     def __post_init__(self):
         self.run_as_server = self.server
@@ -378,6 +386,24 @@ class ComposedCameraSensor(Sensor, SensorServer):
             print(f"Initializing RealSense sensor for camera type: {camera_type}")
             return RealSenseSensor(mount_position=mount_position)
 
+        elif camera_type == "unitree_dds":
+            from gear_sonic.camera.drivers.unitree_dds import UnitreeDDSSensor
+
+            print(f"Initializing Unitree DDS sensor for camera type: {camera_type}")
+            return UnitreeDDSSensor(
+                mount_position=mount_position,
+                dds_interface=self.config.dds_interface,
+            )
+
+        elif camera_type == "unitree_ros2":
+            from gear_sonic.camera.drivers.unitree_ros2 import UnitreeROS2Sensor
+
+            print(f"Initializing Unitree ROS2 sensor for camera type: {camera_type}")
+            return UnitreeROS2Sensor(
+                mount_position=mount_position,
+                dds_interface=self.config.dds_interface,
+            )
+
         elif camera_type.endswith(".mp4"):
             from gear_sonic.camera.drivers.dummy import ReplayDummySensor
 
@@ -500,9 +526,14 @@ class ComposedCameraSensor(Sensor, SensorServer):
 class ComposedCameraClientSensor(Sensor, SensorClient):
     """ZMQ client that deserializes merged camera frames from the server."""
 
-    def __init__(self, server_ip: str = "localhost", port: int = 5555):
+    def __init__(
+        self, server_ip: str = "localhost", port: int = 5555, decode_reduce_factor: int = 1
+    ):
         self.start_client(server_ip, port)
 
+        # 1 = full-res decode (default, used by the viewer); 2/4 = decode JPEGs at
+        # 1/2 or 1/4 via libjpeg scaled decode to cut per-frame decode+resize cost.
+        self.decode_reduce_factor = decode_reduce_factor
         self._latest_message = None
         self._avg_time_per_frame: deque = deque(maxlen=20)
         self._msg_received_time = 0
@@ -512,6 +543,9 @@ class ComposedCameraClientSensor(Sensor, SensorClient):
         self._last_new_message_time = None
         self._last_staleness_warning_time = 0.0
         self._staleness_warning_interval = 2.0
+
+        self._corrupted_frame_count = 0
+        self._last_corrupted_warning_time = 0.0
 
         print("Initialized composed camera client sensor")
 
@@ -528,7 +562,25 @@ class ComposedCameraClientSensor(Sensor, SensorClient):
 
         if message is not None:
             self.idx += 1
-            self._latest_message = ImageMessageSchema.deserialize(message).asdict()
+            try:
+                self._latest_message = ImageMessageSchema.deserialize(
+                    message, reduce_factor=self.decode_reduce_factor
+                ).asdict()
+            except Exception as e:
+                self._corrupted_frame_count += 1
+                if (
+                    current_time - self._last_corrupted_warning_time
+                    >= self._staleness_warning_interval
+                ):
+                    print(
+                        f"[WARNING] [{time.strftime('%H:%M:%S')}] Corrupted camera frame "
+                        f"(recv #{self.idx}) could not be decoded, reusing last good frame. "
+                        f"Corrupted frames so far this session: {self._corrupted_frame_count}. "
+                        f"Error: {e}"
+                    )
+                    self._last_corrupted_warning_time = current_time
+                return self._latest_message
+
             self._last_new_message_time = current_time
 
             if self.idx % 10 == 0:

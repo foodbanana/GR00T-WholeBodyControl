@@ -1,0 +1,112 @@
+# =============================================================================
+# ltw-camera-server:0.1-rgb
+#
+# Intel RealSense D435i 컬러(ego-view/head) 스트림 캡처 → ZMQ port 5555 publish
+# wrist camera 없음 — head(ego-view) 단독 구성.
+# Target: Unitree G1 Orin NX (호스트 JetPack R35.3.1 / Ubuntu 20.04, aarch64)
+# 컨테이너 내부는 Ubuntu 22.04 독립 환경 (호스트 OS와 무관, Docker로 격리됨)
+#
+# 이미지명:   ltw-camera-server:0.1-rgb
+# 컨테이너명: ltw-camera-server
+# =============================================================================
+#
+# [Build] (Orin NX에서, GR00T-WholeBodyControl/ 루트에서)
+#   docker build -f docker/Dockerfile.ltw_camera_server \
+#                -t ltw-camera-server:0.1-rgb .
+#
+# [Run - 정식, 최소 권한 (USB 버스만 컨테이너에 전달)]
+#   docker run --rm \
+#     --name ltw-camera-server \
+#     --network host \
+#     --device=/dev/bus/usb:/dev/bus/usb \
+#     ltw-camera-server:0.1-rgb
+#
+# [Run - 소스 override, 개발용 (gear_sonic 수정 즉시 반영, 재빌드 불필요)]
+#   docker run --rm \
+#     --name ltw-camera-server \
+#     --network host \
+#     --device=/dev/bus/usb:/dev/bus/usb \
+#     -v $(pwd)/gear_sonic:/app/gear_sonic:ro \
+#     ltw-camera-server:0.1-rgb
+#
+# [Rollback]
+#   docker rm -f ltw-camera-server 2>/dev/null; docker rmi ltw-camera-server:0.1-rgb
+# =============================================================================
+
+# base image: ubuntu:22.04 (aarch64)
+# 원래는 호스트 JetPack(R35.3.1)과 정확히 매칭되는 nvcr.io/nvidia/l4t-base:r35.3.1을
+# 쓰려 했으나 NGC에 해당 태그가 게시되지 않아 pull 실패 → ubuntu:20.04로 1차 대체.
+# 이후 20.04(focal)에서는 deadsnakes PPA가 arm64용 python3.10-dev/distutils를
+# 사실상 제공하지 않아 빌드가 실패함. Ubuntu 22.04(jammy)로 전환하면
+# Python 3.10이 시스템 기본 버전이라 PPA 자체가 불필요해져 이 문제를 회피함.
+# 카메라 서버는 CUDA/L4T 전용 레이어를 쓰지 않고 libusb 기반 USB 통신만
+# 필요하므로 호스트 OS 버전과 컨테이너 OS 버전이 달라도 무방함.
+FROM ubuntu:22.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+# ── 1. 기반 유틸리티 + Python 3.10 ──────────────────────────────────────────
+# Ubuntu 22.04(jammy) 기본 Python = 3.10.  gear_sonic requires-python >= 3.10.
+# PPA 불필요 — python3-pip이 apt로 바로 제공되므로 get-pip.py 부트스트랩도 불필요.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-dev \
+        python3-pip \
+        curl \
+        gnupg \
+        ca-certificates \
+        libgl1 \
+        libglib2.0-0 \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── 2. Intel RealSense C++ SDK (컨테이너 독립 설치) ─────────────────────────
+# 호스트에 librealsense2가 설치돼 있어도 무관 — 컨테이너 안에 별도 설치해서
+# 호스트/다른 사용자 환경과 완전히 격리.
+RUN mkdir -p /etc/apt/keyrings \
+    && curl -sSf https://librealsense.intel.com/Debian/librealsense.pgp \
+       | gpg --dearmor -o /etc/apt/keyrings/librealsense.gpg \
+    && echo "deb [signed-by=/etc/apt/keyrings/librealsense.gpg arch=arm64] \
+https://librealsense.intel.com/Debian/apt-repo jammy main" \
+       > /etc/apt/sources.list.d/librealsense.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        librealsense2 \
+        librealsense2-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── 3. Python 패키지 ──────────────────────────────────────────────────────────
+# 제외: depthai (OAK 전용, D435i 불필요) / requests (미사용)
+#       / torch, scipy, pin 등 gear_sonic 코어 의존성 (카메라 서버는 불필요)
+# opencv-python-headless: GUI 없는 서버 전용, libgl 의존 최소화
+RUN python3.10 -m pip install --no-cache-dir \
+    "numpy==1.26.4" \
+    "pyzmq" \
+    "msgpack" \
+    "msgpack-numpy" \
+    "opencv-python-headless" \
+    "tyro" \
+    "pyrealsense2"
+
+# ── 4. gear_sonic.camera 모듈만 복사 (전체 레포 아님) ─────────────────────────
+WORKDIR /app
+COPY gear_sonic/__init__.py gear_sonic/__init__.py
+COPY gear_sonic/camera/    gear_sonic/camera/
+
+ENV PYTHONPATH=/app
+ENV CAMERA_PORT=5555
+
+EXPOSE 5555
+
+# [알려진 제약 1] gear_sonic/camera/composed_camera.py의 _instantiate_camera()에서
+#   realsense 분기는 RealSenseSensor(mount_position=mount_position)만 호출하고
+#   device_id를 전달하지 않음 → --ego-view-device-id는 현재 코드상 무시됨.
+#   D435i 1대만 연결하는 구성이므로 무해(자동으로 첫 번째 장치 선택).
+#   카메라를 여러 대 붙이게 되면 이 부분 코드 수정이 선행되어야 함.
+#
+# [알려진 제약 2] gear_sonic/camera/drivers/realsense.py는 color + depth 스트림을
+#   동시에 활성화하도록 하드코딩되어 있음 (RGB만 원해도 depth도 항상 시도됨).
+#   depth 스트림 활성화가 실패하면 pipeline.start()가 예외를 던져
+#   RealSenseSensor 초기화 자체가 실패 → ego_view가 유일한 카메라이므로
+#   컨테이너가 계속 재시도만 하다가 결국 크래시함. head RGB만 쓸 계획이어도
+#   D435i의 depth 스트림이 정상 동작하는 하드웨어/드라이버 상태인지 별도 확인 필요.
+CMD ["sh", "-c", "python3.10 -m gear_sonic.camera.composed_camera --ego-view-camera realsense --port ${CAMERA_PORT}"]

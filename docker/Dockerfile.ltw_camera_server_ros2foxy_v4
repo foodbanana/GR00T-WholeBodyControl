@@ -1,0 +1,414 @@
+# =============================================================================
+# ltw-camera-server:0.7-foxy-cdds0102-rmw
+#
+# Unitree G1 head(ego-view) 카메라 프레임을, PC2(Orin NX)의 videohub_pc4가
+# ROS 2 topic(/frontvideostream)으로 publish 중인 프레임을 rclpy로
+# subscribe해서 그대로 ZMQ port 5555로 msgpack forward한다.
+#
+# Target: Unitree G1 Orin NX (PC2, eth0 192.168.123.164/24, aarch64,
+#         호스트 OS Ubuntu 20.04 / JetPack R35.3.1, 호스트 ROS 2: Foxy)
+#
+# 이미지명:   ltw-camera-server:0.7-foxy-cdds0102-rmw
+# 컨테이너명: ltw-camera-server
+#
+# [v3 (0.6-foxy-cdds0102) 대비 변경사항]
+#   - rmw_cyclonedds_cpp를 foxy branch에서 소스빌드 (섹션 3.7)
+#   - 우리 CycloneDDS 0.10.2 헤더로 컴파일 → Layer 1(libddsc)/Layer 2(rmw)
+#     API 매칭
+#   - AMENT_PREFIX_PATH로 apt rmw 대신 우리 rmw가 우선 로드되도록 override
+#     (섹션 3.8)
+#
+# [이전 시도 이력]
+#   0.1-rgb : D435i를 컨테이너 안에서 직접 USB open — 다른 팀과 카메라
+#             장치를 두고 충돌, --device 마운트 필요.
+#   0.2-dds : unitree_sdk2py의 raw ChannelSubscriber로 구독 시도 — 콜백이
+#             한 번도 안 불림. /frontvideostream은 raw DDS topic이 아니라
+#             ROS 2 topic(rclpy/rclcpp)이라, raw DDS reader는 ROS 2 RMW의
+#             encapsulation/QoS를 이해 못 해 discovery 자체가 안 됨.
+#   0.3-ros2: ros:foxy-ros-base 기반 + CycloneDDS 0.10.2를 소스에서 직접
+#             빌드(ENABLE_SHM=OFF)해서 호스트와 wire protocol 맞춤. 작동은
+#             했으나 이미지가 무겁고, base image가 aarch64 전용이 아니라서
+#             Jetson 최적화 레이어(CUDA/L4T 런타임 등)를 못 씀.
+#   0.4-foxy: base를 nvcr.io/nvidia/l4t-jetpack으로 바꾸고, CycloneDDS는
+#             소스 빌드 대신 apt(ros-foxy-rmw-cyclonedds-cpp, 0.7.x)로
+#             설치. 하지만 섹션 4에서 unitree_go 메시지를 얻으려고 clone한
+#             https://github.com/unitreerobotics/unitree_ros2 저장소에
+#             unitree_go 패키지가 실제로 없어서 colcon이 "0 packages
+#             finished"로 조용히 실패, ModuleNotFoundError.
+#   0.5-foxy-planB: unitree_go를 프로젝트 안에 최소 vendor 패키지로 직접
+#             정의(docker/vendor/unitree_go/)해서 colcon build 성공,
+#             import 성공, ROS 2 topic discovery까지 성공. 하지만 데이터
+#             콜백이 안 옴 — apt CycloneDDS 0.7.0과 호스트가 실제로 쓰는
+#             0.10.2 사이의 wire protocol mismatch가 진짜 원인이었음
+#             (호스트 videohub_pc4의 /proc/<pid>/maps 실측:
+#             libddsc.so.0.10.2, /home/unitree/cyclonedds_ws/install 경로
+#             자체 소스빌드).
+#   0.6-foxy-cdds0102: kist-drl-g1-onboard 팀 패턴 채용 — apt
+#             rmw_cyclonedds_cpp는 그대로 두고(dependency로 필요),
+#             CycloneDDS 0.10.2(호스트와 동일 버전)를 /opt/cyclonedds/install
+#             에 소스빌드한 뒤 LD_LIBRARY_PATH override로 런타임에 우리
+#             0.10.2가 우선 로드되도록 함 (섹션 3.5, 3.6). 빌드 성공,
+#             override 검증 성공(rmw가 실제로 우리 0.10.2를 로드), discovery
+#             성공, 데이터도 실제로 도착. 하지만 rmw 파싱 단계에서 실패:
+#               'unable initialize generic sequence, at
+#                .../ros-foxy-rmw-cyclonedds-cpp-0.7.11/src/serdata.cpp:311'
+#               'invalid data size, at .../serdata.cpp:308'
+#             근본 원인: apt rmw_cyclonedds_cpp 0.7.11은 CycloneDDS 0.7 API로
+#             컴파일된 바이너리라, 우리가 런타임에 로드시킨 0.10.2 C
+#             library와 내부 데이터 구조(serdata 등)가 ABI 레벨에서 어긋남 —
+#             kist 팀은 Humble(apt rmw가 애초에 0.10.x용으로 빌드됨)을 쓰기
+#             때문에 이 문제 자체가 없었고, Foxy를 쓰는 우리만 겪는 문제였다.
+#   0.7-foxy-cdds0102-rmw(이 파일): rmw_cyclonedds_cpp도 foxy branch에서
+#             우리 CycloneDDS 0.10.2 헤더로 소스빌드해서 Layer 1/2를 완전히
+#             매칭시킨다 — Unitree 공식 unitree_ros2 저장소 README가 규정한
+#             절차와 동일 방식 (QRE DOCS, CMU autonomy_stack_go2 등 다수
+#             프로젝트에서 검증됨). Unitree는 CycloneDDS와 rmw를 한
+#             workspace에서 같이 빌드하지만, 우리는 v3의 CycloneDDS
+#             소스빌드 자산(섹션 3.5)을 그대로 재사용하기 위해 rmw만 별도
+#             workspace(/opt/rmw_cyclonedds_ws)에서 빌드 — 결과는 동일하게
+#             rmw가 우리 CycloneDDS 헤더로 컴파일된다.
+#
+# [배경] 0.1 ~ 0.6 Dockerfile은 학습 자산으로 보존, 수정하지 않는다.
+#
+# [Build] (Orin NX에서, GR00T-WholeBodyControl/docker/ 디렉토리를 build
+#          context로 — src/, config/, vendor/ 상대 경로 COPY 때문에
+#          docker/ 루트로 지정해야 한다)
+#   docker build -f docker/Dockerfile.ltw_camera_server_ros2foxy_v4 \
+#                -t ltw-camera-server:0.7-foxy-cdds0102-rmw docker/
+#
+# [Run]
+#   ./docker/run_ltw_camera_server_ros2foxy.sh
+#   (IMAGE_TAG를 0.7-foxy-cdds0102-rmw로 바꿔서 사용 — 스크립트 자체는
+#   v2/v3/v4 공용, 태그만 sed로 교체)
+#
+# [Verify — rmw가 실제로 우리 소스빌드 CycloneDDS를 쓰는지 확인]
+#   docker exec -it ltw-camera-server bash
+#   ros2 doctor --report | grep RMW
+#   → middleware name = rmw_cyclonedds_cpp
+#   ldd /opt/rmw_cyclonedds_ws/install/rmw_cyclonedds_cpp/lib/librmw_cyclonedds_cpp.so \
+#     | grep libddsc
+#   → /opt/cyclonedds/install/lib/libddsc.so.0.10.2 이어야 함 (apt 경로면 실패)
+#
+# [Rollback]
+#   docker rm -f ltw-camera-server 2>/dev/null; docker rmi ltw-camera-server:0.7-foxy-cdds0102-rmw
+# =============================================================================
+
+# l4t-jetpack r35.3.1 = JetPack 5.1.1 = Ubuntu 20.04(focal) 기반 — 호스트
+# OS(Ubuntu 20.04, Foxy)와 정확히 일치. ros:foxy-ros-base(0.3-ros2에서 사용)
+# 대신 이 base를 쓰는 이유는, l4t-jetpack이 Jetson용 CUDA/L4T 런타임
+# 레이어를 이미 포함하고 있어 향후 GPU 가속(예: 영상 처리)이 필요해질 때
+# 추가 base 교체 없이 확장 가능하기 때문. 이번 컨테이너 자체는 GPU를 쓰지
+# 않지만, 이 base 선택은 팀의 다른 Jetson 이미지들과의 일관성이기도 하다.
+FROM nvcr.io/nvidia/l4t-jetpack:r35.3.1
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV ROS_DISTRO=foxy
+ENV LANG=en_US.UTF-8
+ENV LC_ALL=en_US.UTF-8
+SHELL ["/bin/bash", "-c"]
+
+# -----------------------------------------------------------------------------
+# 1. Base tools + locale
+# -----------------------------------------------------------------------------
+# build-essential + cmake: unitree_go colcon build가 rosidl typesupport C
+# 코드를 컴파일할 때 필요 (섹션 4). 이 이미지에서는 CycloneDDS C 라이브러리를
+# 직접 빌드하지 않으므로(섹션 3에서 apt로 대체) 0.3-ros2보다 훨씬 가볍다.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        cmake \
+        curl \
+        git \
+        gnupg \
+        locales \
+        lsb-release \
+        python3-pip \
+    && locale-gen en_US.UTF-8 \
+    && update-locale LANG=en_US.UTF-8 \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# 2. ROS 2 Foxy apt source
+# -----------------------------------------------------------------------------
+# r35.3.1 = Ubuntu 20.04 = focal 이므로 ROS 2 공식 apt repo도 focal용 라인을
+# 그대로 사용하면 된다 (별도 backport/PPA 불필요).
+RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+        -o /usr/share/keyrings/ros-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" \
+        > /etc/apt/sources.list.d/ros2.list
+
+# -----------------------------------------------------------------------------
+# 3. ROS 2 Foxy + rmw-cyclonedds (apt, 소스빌드 안 함)
+# -----------------------------------------------------------------------------
+# 왜 rmw_cyclonedds_cpp인가: 호스트 videohub_pc4가 이 RMW로 publish 중이다.
+# Foxy 기본 RMW(rmw_fastrtps_cpp)로 두면 discovery 자체가 안 된다.
+#
+# 왜 소스빌드를 안 하는가(0.3-ros2와의 핵심 차이): apt로 설치되는
+# ros-foxy-rmw-cyclonedds-cpp는 CycloneDDS 0.7.x 계열이고, 호스트 Orin NX의
+# videohub_pc4도 동일하게 apt 0.7.x 스택 위에서 돈다. 버전을 소스에서 임의로
+# 올리면(예: 0.10.2) wire protocol이 달라져 discovery가 조용히 실패한다 —
+# 과거 이 프로젝트에서 0.10.5로 시도했다가 크래시는 안 났지만 G1이 밸런스를
+# 잃고 발산한 사고 이력이 있다(다른 컴포넌트, DGX Spark sim2sim 작업 당시).
+# apt 버전을 그대로 쓰면 호스트와 정확히 같은 패키지이므로 이 리스크가 없다.
+#
+# ros-foxy-rosidl-generator-dds-idl: unitree_go 메시지 패키지(섹션 4)의
+# colcon build가 rosidl_generator_dds_idlConfig.cmake를 요구한다.
+#
+# python3-colcon-common-extensions / python3-empy / python3-lark /
+# python3-catkin-pkg: unitree_go 메시지 소스 빌드(colcon)에 필요한 파이썬
+# 빌드 도구 체인.
+#
+# 여기서 unitree_sdk2py는 절대 설치하지 않는다 — raw DDS 채널 접근용
+# 라이브러리라 이 컨테이너의 목적(rclpy subscribe)과 안 맞을 뿐 아니라,
+# 의존성으로 cyclonedds 0.10.x대 python 바인딩을 끌어와 위에서 맞춰둔
+# apt 0.7.0 스택과 충돌한다.
+#
+# 이 rmw가 요구하는 CycloneDDS 0.7 apt 라이브러리(libddsc.so.0)는 그대로
+# 설치되지만, 섹션 3.6의 LD_LIBRARY_PATH override로 런타임에는 우리가
+# 소스빌드한 0.10.2가 우선 로드된다 — apt 패키지 자체를 지우거나 apt로
+# 설치되지 않게 막을 필요는 없다(rmw_cyclonedds_cpp의 의존성 해결 자체는
+# 그대로 두고, 실제 로드되는 .so만 바꿔치기하는 방식).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3-catkin-pkg \
+        python3-empy \
+        python3-lark \
+        ros-foxy-ros-base \
+        ros-foxy-rmw-cyclonedds-cpp \
+        ros-foxy-rosidl-generator-dds-idl \
+        python3-colcon-common-extensions \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# 3.5. CycloneDDS 0.10.2 (source build) — v3의 진짜 핵심
+# -----------------------------------------------------------------------------
+# v1, v2 실패의 근본 원인:
+#   호스트 videohub_pc4는 CycloneDDS 0.10.2 소스빌드 사용 중이지만,
+#   우리 v2 컨테이너는 apt로 ros-foxy-cyclonedds 0.7.0을 사용해서
+#   wire protocol이 mismatch였다. (0.7 <-> 0.10.2 DDSI-RTPS 차이로 인해
+#   segfault, bad_alloc, discovery 후 data zero 등 다양한 실패)
+#
+# 조사한 호스트 실측:
+#   sudo ldd /proc/$(pgrep videohub_pc4)/exe | grep dds
+#   → libddsc.so.0 => /home/unitree/cyclonedds_ws/install/cyclonedds/lib/libddsc.so.0
+#   sudo cat /proc/$(pgrep videohub_pc4)/maps | grep dds
+#   → libddsc.so.0.10.2
+#
+# v3 해결책 (kist-drl-g1-onboard 팀 검증된 패턴, 그들은 0.10.5 사용):
+#   1) rmw_cyclonedds_cpp는 apt로 유지 (섹션 3)
+#   2) CycloneDDS 0.10.2를 /opt/cyclonedds/install에 소스빌드 (이 섹션)
+#   3) LD_LIBRARY_PATH에서 /opt/cyclonedds/install/lib을
+#      /opt/ros/foxy/lib보다 앞에 두어 runtime linker override (섹션 3.6)
+#
+# 이러면 apt rmw_cyclonedds_cpp는 dlopen("libddsc.so.0")할 때 우리 0.10.2를
+# 로드해서 wire protocol이 videohub_pc4와 정확히 매칭된다.
+#
+# 우리와 kist의 차이:
+#   - 버전: kist 0.10.5, 우리 0.10.2 (videohub_pc4와 완전 동일)
+#   - Python cyclonedds binding: kist 소스빌드, 우리 미설치
+#     (kist는 raw DDS 접근용으로 unitree_sdk2_python을 씀. 우리는 rclpy만
+#     사용하므로 불필요. 오히려 pip install cyclonedds가 다른 라이브러리를
+#     끌어와서 우리 override를 깨뜨릴 위험이 있어 의도적으로 미설치.)
+ARG CYCLONEDDS_VERSION=0.10.2
+
+WORKDIR /opt
+RUN git clone --depth 1 --branch ${CYCLONEDDS_VERSION} \
+    https://github.com/eclipse-cyclonedds/cyclonedds.git
+
+WORKDIR /opt/cyclonedds/build
+RUN cmake .. \
+        -DBUILD_EXAMPLES=OFF \
+        -DBUILD_IDLC=ON \
+        -DCMAKE_INSTALL_PREFIX=/opt/cyclonedds/install \
+    && cmake --build . --target install \
+    && rm -rf /opt/cyclonedds/build
+
+# 참고: ENABLE_SHM 옵션을 명시적으로 주지 않는다. kist Dockerfile도
+# 그렇게 하고(그들이 이 로봇에서 성공 확인) SHM은 CycloneDDS 기본값을
+# 그대로 쓴다. 나중에 SHM 관련 문제가 생기면 이 시점에 -DENABLE_SHM=OFF를
+# 추가하는 것을 검토한다.
+
+# -----------------------------------------------------------------------------
+# 3.6. CycloneDDS ENV (LD_LIBRARY_PATH override — v3 핵심 트릭)
+# -----------------------------------------------------------------------------
+# LD_LIBRARY_PATH의 순서가 결정적이다:
+#   /opt/cyclonedds/install/lib   ← 우리 0.10.2, 이게 먼저 있어야 함
+#   /opt/ros/foxy/lib             ← apt 0.7.0, 뒤에 있어야 함
+#
+# rmw_cyclonedds_cpp가 dlopen("libddsc.so.0") 할 때 로더가 위 순서대로
+# 검색해서 우리 0.10.2를 먼저 찾는다. apt 것은 존재하지만 무시된다.
+#
+# CMAKE_PREFIX_PATH도 같은 순서 원칙 — 나중에 뭔가 재빌드할 때 우리
+# CycloneDDS를 찾도록 하기 위함.
+ENV CYCLONEDDS_HOME=/opt/cyclonedds/install
+ENV CycloneDDS_DIR=/opt/cyclonedds/install/lib/cmake/CycloneDDS
+ENV CMAKE_PREFIX_PATH=/opt/cyclonedds/install:/opt/ros/foxy
+ENV LD_LIBRARY_PATH=/opt/cyclonedds/install/lib:/opt/ros/foxy/lib:/opt/ros/foxy/lib/aarch64-linux-gnu
+ENV PATH=/opt/cyclonedds/install/bin:${PATH}
+
+# -----------------------------------------------------------------------------
+# 3.7. rmw_cyclonedds_cpp source build (foxy branch) — v4 진짜 핵심
+# -----------------------------------------------------------------------------
+# v3 실패의 근본 원인:
+#   apt로 설치한 rmw_cyclonedds_cpp 0.7.11은 CycloneDDS 0.7 API로
+#   컴파일된 것이라 우리 0.10.2 C library와 데이터 구조 mismatch.
+#   그 결과 serdata.cpp:308/311에서 'invalid data size' 에러.
+#
+# v4 해결책 (Unitree 공식 unitree_ros2 절차, 다수 프로젝트에서 검증됨):
+#   rmw_cyclonedds foxy branch를 clone해서 우리 CycloneDDS 0.10.2 헤더로
+#   재컴파일. 이러면 Layer 2 (rmw)가 Layer 1 (libddsc)과 API 매칭됨.
+#
+# 빌드 세부사항:
+#   - Branch: foxy (Foxy용, 우리 ROS 2 배포판과 매칭)
+#   - CMAKE_PREFIX_PATH와 CycloneDDS_DIR을 명시해 우리 CycloneDDS를 참조
+#   - 별도 workspace /opt/rmw_cyclonedds_ws에 빌드 (v3의
+#     unitree_ros2_ws와 분리, 각 workspace 목적 명확)
+#   - --packages-select rmw_cyclonedds_cpp 명시로 다른 것은 안 건드림
+#
+# 이 rmw는 섹션 3.8의 AMENT_PREFIX_PATH override로 apt rmw보다
+# 우선 로드된다. 확인 방법: 컨테이너 실행 후
+#   ros2 doctor --report | grep RMW
+#   → middleware name = rmw_cyclonedds_cpp
+# 그리고
+#   ldd /opt/rmw_cyclonedds_ws/install/rmw_cyclonedds_cpp/lib/librmw_cyclonedds_cpp.so \
+#     | grep libddsc
+#   → /opt/cyclonedds/install/lib/libddsc.so.0.10.2 이어야 함
+WORKDIR /opt/rmw_cyclonedds_ws/src
+RUN git clone --depth 1 --branch foxy \
+    https://github.com/ros2/rmw_cyclonedds.git
+
+WORKDIR /opt/rmw_cyclonedds_ws
+RUN source /opt/ros/foxy/setup.bash \
+    && colcon build \
+       --packages-select rmw_cyclonedds_cpp \
+       --cmake-args \
+         -DCMAKE_PREFIX_PATH=/opt/cyclonedds/install \
+         -DCycloneDDS_DIR=/opt/cyclonedds/install/lib/cmake/CycloneDDS \
+    && rm -rf build log
+
+# -----------------------------------------------------------------------------
+# 3.8. rmw override ENV (AMENT_PREFIX_PATH)
+# -----------------------------------------------------------------------------
+# ROS 2가 rmw 구현을 찾을 때 AMENT_PREFIX_PATH를 앞에서부터 검색한다.
+# 우리 소스빌드 rmw workspace 경로를 apt 경로(/opt/ros/foxy)보다
+# 먼저 두면 우리 것이 우선 로드된다.
+#
+# 이 ENV만으로는 부족하고 실행 시 setup.bash를 소싱해야 한다는 점 주의
+# → 섹션 8, 9에서 source 추가.
+ENV AMENT_PREFIX_PATH=/opt/rmw_cyclonedds_ws/install/rmw_cyclonedds_cpp:${AMENT_PREFIX_PATH:-/opt/ros/foxy}
+
+# -----------------------------------------------------------------------------
+# 4. unitree_go message package (Plan B: in-repo minimal vendor)
+# -----------------------------------------------------------------------------
+# v1(0.4-foxy) 실패 원인: https://github.com/unitreerobotics/unitree_ros2를
+# clone해서 `colcon build --packages-select unitree_go`를 시도했으나
+# 그 repo에는 unitree_go 패키지가 실제로 존재하지 않음(Go2 ROS 2 예제
+# 모음이지 메시지 정의 저장소가 아니었음). colcon은 "0 packages finished"로
+# 조용히 종료했고 install/COLCON_IGNORE만 남았음.
+#
+# v2 접근: 우리가 필요한 최소 unitree_go 패키지를 프로젝트 안에 vendor로
+# 정의하고, 그것을 그대로 콜콘 빌드한다.
+#
+# vendor 구조 (docker/vendor/unitree_go/):
+#   package.xml         표준 rosidl_interface_packages 그룹 소속
+#   CMakeLists.txt      rosidl_generate_interfaces 표준 패턴
+#   msg/Go2FrontVideoData.msg
+#      호스트의 프로덕션 소스에서 그대로 복사한 필드 정의:
+#      /upgradePythonServer/temp/unitree/module/graph_pid_ws/src/
+#          unitree_go/msg/Go2FrontVideoData.msg
+#
+# Wire protocol 매칭 근거:
+#   - 필드 정의가 호스트 원본과 동일 → DDSI-RTPS wire format 자동 매칭
+#     (DDS 표준: 필드 정의가 같으면 언어/생성 도구와 무관하게 wire 호환)
+#   - Foxy로 명시 build → typesupport ABI가 호스트 배포판에 의존하지 않음
+#   - rmw_cyclonedds_cpp(apt 0.7.0)와 typesupport가 동일 이미지에서 나오므로
+#     ABI 매칭 자동
+#
+# 나중에 depth/IMU 등 추가 시:
+#   1. 호스트에서 해당 .msg 파일을 docker/vendor/unitree_go/msg/로 복사
+#   2. CMakeLists.txt의 rosidl_generate_interfaces에 파일명 한 줄 추가
+#   3. 재빌드
+WORKDIR /opt/unitree_ros2_ws
+RUN mkdir -p src
+COPY vendor/unitree_go /opt/unitree_ros2_ws/src/unitree_go
+RUN source /opt/ros/foxy/setup.bash \
+    && colcon build --packages-select unitree_go --symlink-install \
+    && rm -rf build log
+
+# -----------------------------------------------------------------------------
+# 5. Python 런타임 의존성
+# -----------------------------------------------------------------------------
+# pyzmq==25.1.2: 이 아키텍처(aarch64) + Python 3.8 조합에서 prebuilt wheel이
+# 존재하는 마지막 버전 (이전 세션에서 검증됨). 더 최신 버전은 소스 빌드로
+# 떨어져 r35.3.1 환경에서 실패한다.
+# msgpack==1.0.5: 마찬가지로 aarch64 + Python 3.8 prebuilt wheel이 있는
+# 안정 버전.
+RUN python3 -m pip install --no-cache-dir \
+        "pyzmq==25.1.2" \
+        "msgpack==1.0.5"
+
+# -----------------------------------------------------------------------------
+# 6. ROS runtime env
+# -----------------------------------------------------------------------------
+# 호스트 videohub_pc4가 Domain 0에서 rmw_cyclonedds_cpp로 publish 중이므로
+# 여기도 정확히 같은 값으로 고정한다. 하나라도 어긋나면(예: 기본 RMW로
+# 되돌아가거나 다른 domain을 쓰면) discovery가 에러 없이 그냥 조용히
+# 안 된다 — 겉보기엔 정상 기동한 것처럼 보여서 디버깅이 까다롭다.
+ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+ENV ROS_DOMAIN_ID=0
+ENV CYCLONEDDS_URI=file:///etc/cyclonedds.xml
+
+# -----------------------------------------------------------------------------
+# 7. App
+# -----------------------------------------------------------------------------
+WORKDIR /app
+COPY src/camera_subscriber.py /app/camera_subscriber.py
+COPY config/cyclonedds.xml /etc/cyclonedds.xml
+
+# -----------------------------------------------------------------------------
+# 8. 개발 편의 (/root/.bashrc) — docker exec로 들어가 디버깅할 때
+#    ROS 2 / unitree_go 환경이 자동으로 잡히도록
+# -----------------------------------------------------------------------------
+# CycloneDDS 관련 export들도 추가 — interactive shell(docker exec)에서도
+# 섹션 3.6의 LD_LIBRARY_PATH override가 유지되어야, 컨테이너 안에서
+# ros2 topic echo 등으로 디버깅할 때도 우리 0.10.2가 로드된다. ENV로 이미
+# 이미지 전체에 박혀 있지만, 여기 다시 echo하는 이유는 이 파일 하나만 보고도
+# exec 진입 시 어떤 값이 유효한지 바로 확인할 수 있게 하기 위함(섹션 6의
+# ROS runtime env와 같은 이유).
+RUN { \
+        echo "source /opt/ros/foxy/setup.bash"; \
+        echo "source /opt/rmw_cyclonedds_ws/install/setup.bash"; \
+        echo "source /opt/unitree_ros2_ws/install/setup.bash"; \
+        echo "export CYCLONEDDS_HOME=/opt/cyclonedds/install"; \
+        echo "export CycloneDDS_DIR=/opt/cyclonedds/install/lib/cmake/CycloneDDS"; \
+        echo "export CMAKE_PREFIX_PATH=/opt/cyclonedds/install:/opt/ros/foxy:\$CMAKE_PREFIX_PATH"; \
+        echo "export LD_LIBRARY_PATH=/opt/cyclonedds/install/lib:/opt/ros/foxy/lib:/opt/ros/foxy/lib/aarch64-linux-gnu:\$LD_LIBRARY_PATH"; \
+        echo "export PATH=/opt/cyclonedds/install/bin:\$PATH"; \
+        echo "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp"; \
+        echo "export CYCLONEDDS_URI=file:///etc/cyclonedds.xml"; \
+    } >> /root/.bashrc
+
+# -----------------------------------------------------------------------------
+# 9. Runtime notes
+# -----------------------------------------------------------------------------
+# - No USB/device passthrough (no --device, no /dev mount) — this image never
+#   opens a camera device, it only subscribes to a ROS 2 topic.
+# - --network host is required for ROS 2/CycloneDDS multicast discovery to
+#   see the host's real eth0 interface.
+# - 이 컨테이너는 videohub_pc4를 절대 재시작/정지하지 않는다 — subscribe만
+#   한다. 로봇은 여러 팀이 공유하므로 다른 팀의 카메라 피드 접근을 깨뜨리면
+#   안 된다.
+EXPOSE 5555
+
+# exec를 붙여 python3가 PID 1이 되도록 한다 — 그래야 `docker stop`이
+# 보내는 SIGTERM을 python3 프로세스가 직접 받아 rclpy.shutdown()/소켓
+# close 등 정리 로직(camera_subscriber.py의 finally 블록)이 실행된다.
+# bash -c로 감쌌을 때 exec가 없으면 bash가 PID 1로 남아 SIGTERM을 못 받고
+# SIGKILL 타임아웃까지 끌려가는 경우가 있다.
+CMD ["bash", "-c", "source /opt/ros/foxy/setup.bash && \
+                    source /opt/rmw_cyclonedds_ws/install/setup.bash && \
+                    source /opt/unitree_ros2_ws/install/setup.bash && \
+                    exec python3 /app/camera_subscriber.py \
+                         --topic /frontvideostream \
+                         --port 5555 \
+                         --resolution 720p \
+                         --mount-position ego_view"]
