@@ -6,7 +6,9 @@
   1) 프레임 수 일치      : parquet 행 == 각 mp4 프레임 == info.total_frames
   2) frame_index 연속성  : 0..N-1
   3) timestamp 시간축    : frame_index/fps 균일 그리드 (배속/어긋남 없음)
-  4) fps 3층 일관성      : info.json == mp4 avg_frame_rate == parquet dt
+  4) 정지/중복 프레임    : 프레임 간 변화량으로 D405 wedge(스트림 정지)를 검출.
+                          [6]의 픽셀평균은 "얼어붙은 화면"도 정상으로 통과시키므로,
+                          오염된 에피소드를 걸러내려면 이 검사가 필요하다.
   5) 관절/액션 무결성    : NaN 없음, 길이 일치
   6) LeRobot 실제 로딩   : LeRobotDataset(root=...) → ds[0]에 3카메라+state+action,
                           비디오가 실제 디코드(검정 아님)되는지
@@ -14,7 +16,8 @@
 사용:
   source .venv_data_collection/bin/activate
   python gear_sonic/scripts/verify_dataset.py outputs/2026-07-14-21-14-36
-  python gear_sonic/scripts/verify_dataset.py outputs/<날짜> --no-load   # LeRobot 로딩 스킵(빠름)
+  python gear_sonic/scripts/verify_dataset.py outputs/<날짜> --no-load     # LeRobot 로딩 스킵(빠름)
+  python gear_sonic/scripts/verify_dataset.py outputs/<날짜> --no-freeze   # 정지 프레임 검사 스킵(긴 에피소드에서 느림)
 
 종료코드: 모두 통과=0, 하나라도 실패=1.
 """
@@ -24,6 +27,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 OK = "\033[92m✅\033[0m"
@@ -68,7 +72,71 @@ def ffprobe_video(path: Path):
     }
 
 
-def verify(root: Path, do_load: bool) -> bool:
+# 프레임 간 grayscale 평균절대차가 이 값 미만이면 "직전과 동일한 화면"으로 본다.
+# 실측 분포는 0.0~0.1(완전 중복)과 0.5+(실제 움직임)로 뚜렷이 갈려 임계값에 둔감하다.
+_DUP_THRESH = 0.5
+# 이 시간(초) 이상 연속으로 화면이 멈춰 있으면 wedge로 판정해 FAIL.
+_WEDGE_SEC = 1.0
+
+
+def frame_diffs(path: Path) -> np.ndarray:
+    """mp4를 디코드해 프레임 간 grayscale 평균절대차 배열을 반환."""
+    cap = cv2.VideoCapture(str(path))
+    diffs, prev = [], None
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        if prev is not None:
+            diffs.append(float(np.abs(gray - prev).mean()))
+        prev = gray
+    cap.release()
+    return np.asarray(diffs)
+
+
+def longest_run(mask: np.ndarray) -> int:
+    """mask에서 True가 연속으로 이어지는 최대 길이."""
+    run = best = 0
+    for x in mask:
+        run = run + 1 if x else 0
+        best = max(best, run)
+    return best
+
+
+def check_frozen(mp4s, fps: float) -> bool:
+    """카메라별 정지/중복 프레임 검사.
+
+    두 가지를 구분한다:
+      - 긴 연속 정지  → wedge. 그 구간 데이터는 못 씀 → FAIL
+      - 흩어진 중복    → 소스 프레임률이 dataset fps보다 낮을 뿐 → WARN (사용 가능)
+        (예: 머리 videohub가 ~14Hz인데 20fps로 저장하면 약 28%가 중복)
+    """
+    ok_all = True
+    for f in mp4s:
+        cam = f.parent.name.replace("observation.images.", "")
+        d = frame_diffs(f)
+        if len(d) == 0:
+            _p(NO, f"{cam}: 프레임을 읽지 못함")
+            ok_all = False
+            continue
+        dup = d < _DUP_THRESH
+        run = longest_run(dup)
+        run_sec = run / fps
+        uniq_hz = fps * (1.0 - dup.mean())
+
+        if run_sec >= _WEDGE_SEC:
+            _p(NO, f"{cam}: 정지 {100*dup.mean():.1f}% — 최장 {run}프레임({run_sec:.2f}s) 연속 정지 → wedge 의심!")
+            ok_all = False
+        elif dup.mean() > 0.05:
+            _p(WARN, f"{cam}: 중복 {100*dup.mean():.1f}% (최장 {run}프레임 연속) — "
+                     f"소스 신규프레임률 ≈ {uniq_hz:.1f}Hz < {fps:g}fps. wedge 아님, 사용 가능")
+        else:
+            _p(OK, f"{cam}: 정지 프레임 {dup.sum()}/{len(d)} ({100*dup.mean():.1f}%) — 스트림 정상")
+    return ok_all
+
+
+def verify(root: Path, do_load: bool, do_freeze: bool) -> bool:
     ok_all = True
     print(f"\n=== 데이터셋 검증: {root} ===")
 
@@ -121,6 +189,13 @@ def verify(root: Path, do_load: bool) -> bool:
        f"dt 평균={dt.mean():.6f}s 기대={1/fps:.6f}s std={dt.std():.2e} → 균일: {uniform}")
     _p(OK, f"처음 5개 ts: {np.round(ts[:5], 5).tolist()}")
     ok_all &= uniform
+
+    # --- 정지/중복 프레임 (wedge 검출) ---
+    if do_freeze:
+        print("\n[4] 정지/중복 프레임 (D405 wedge 검출)")
+        ok_all &= check_frozen(mp4s, fps)
+    else:
+        print("\n[4] 정지 프레임 검사 스킵 (--no-freeze)")
 
     # --- 관절/액션 무결성 ---
     print("\n[5] 관절/액션 무결성 (NaN)")
@@ -179,12 +254,13 @@ def main():
     ap = argparse.ArgumentParser(description="LeRobot 데이터셋 정렬/로딩 검증")
     ap.add_argument("dataset", help="데이터셋 폴더 (outputs/<날짜>)")
     ap.add_argument("--no-load", action="store_true", help="LeRobot 실제 로딩 검사 스킵(빠름)")
+    ap.add_argument("--no-freeze", action="store_true", help="정지 프레임 검사 스킵(긴 에피소드에서 느림)")
     args = ap.parse_args()
     root = Path(args.dataset)
     if not (root / "meta" / "info.json").exists():
         print(f"{NO} {root}/meta/info.json 없음 — 데이터셋 경로 확인")
         sys.exit(2)
-    sys.exit(0 if verify(root, not args.no_load) else 1)
+    sys.exit(0 if verify(root, not args.no_load, not args.no_freeze) else 1)
 
 
 if __name__ == "__main__":
