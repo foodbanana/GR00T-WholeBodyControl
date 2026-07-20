@@ -370,13 +370,20 @@ def wrist_encoder(
     jpeg_latest: LatestFrame,
     jpeg_quality: int,
     stop_event: threading.Event,
+    content_hz: dict = None,
 ) -> None:
     """인코딩 전용 스레드. 항상 '가장 최신' RAW만 JPEG로 인코딩한다. 인코딩이
     카메라 레이트보다 느려도 큐가 아니라 최신 슬롯을 읽으므로 오래된 프레임은
-    자연히 건너뛰고(=지연 누적 없음), 발행 루프는 이 JPEG 슬롯을 그대로 소비한다."""
+    자연히 건너뛰고(=지연 누적 없음), 발행 루프는 이 JPEG 슬롯을 그대로 소비한다.
+
+    content_hz(옵션): 진단용 공유 딕셔너리. JPEG 바이트를 해싱해 '내용이 실제로
+    바뀐' 프레임만 세어 mount별 콘텐츠 Hz를 기록한다. wedge(같은 옛 프레임 반복)
+    시 fps는 30이어도 content_hz는 0 근처로 떨어져 실시간 감지된다."""
     encode_params = [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality]
     last_ts = None
     frame_count = 0
+    content_count = 0      # 내용이 바뀐(=새로운) 프레임 수
+    last_hash = None
     last_log = time.time()
     while not stop_event.is_set():
         snap = raw_latest.get()
@@ -388,13 +395,23 @@ def wrist_encoder(
         ok, buf = cv2.imencode(".jpg", frame, encode_params)
         if not ok:
             continue
-        jpeg_latest.set(buf.tobytes(), ts)
+        jpeg_bytes = buf.tobytes()
+        jpeg_latest.set(jpeg_bytes, ts)
         frame_count += 1
+        h = hash(jpeg_bytes)          # 내용 변화 감지(wedge면 동일 바이트 반복)
+        if h != last_hash:
+            content_count += 1
+            last_hash = h
         now = time.time()
         if now - last_log >= 5.0:
-            print(f"[3cam][{mount}] fps: {frame_count / (now - last_log):.1f} "
+            dt = now - last_log
+            if content_hz is not None:
+                content_hz[mount] = content_count / dt
+            print(f"[3cam][{mount}] fps: {frame_count / dt:.1f} "
+                  f"| content: {content_count / dt:.1f}Hz "
                   f"({buf.size / 1024:.1f} KB/frame)", flush=True)
             frame_count = 0
+            content_count = 0
             last_log = now
 
 
@@ -473,6 +490,7 @@ def main():
     stop_event = threading.Event()
     wrist_threads = []
     wrist_latests = {}  # mount -> LatestFrame
+    content_hz = {}     # 진단용: mount -> 실제 콘텐츠 Hz (손목 encoder가 갱신)
 
     # docker stop(SIGTERM)/Ctrl+C(SIGINT) 시 카메라를 깨끗이 release(STREAMOFF)한다.
     def _shutdown(signum, _frame):
@@ -528,7 +546,8 @@ def main():
             )
             te = threading.Thread(
                 target=wrist_encoder,
-                args=(mount, raw_latest, jpeg_latest, args.jpeg_quality, stop_event),
+                args=(mount, raw_latest, jpeg_latest, args.jpeg_quality, stop_event,
+                      content_hz),
                 daemon=True,
             )
             tg.start()
@@ -567,6 +586,8 @@ def main():
     frame_count = 0
     error_count = 0
     stale_warn = 0
+    head_content_count = 0   # 머리 내용이 실제로 바뀐 프레임 수(RPC가 새 JPEG 반환)
+    head_last_hash = None
     last_log = time.time()
     stale_thresh = 1.0
 
@@ -583,6 +604,13 @@ def main():
 
             ts = time.time()
             head_bytes = bytes(data)
+            # 진단: RPC가 준 raw 바이트(리사이즈 전 = 진짜 소스 콘텐츠)를 해싱.
+            # GetImageSample은 새 프레임이 없으면 직전 바이트를 재반환하므로,
+            # 바이트가 바뀔 때만 세면 videohub의 실제 콘텐츠 Hz가 나온다.
+            _hh = hash(head_bytes)
+            if _hh != head_last_hash:
+                head_content_count += 1
+                head_last_hash = _hh
             # 사전 리사이즈: RPC 1080p JPEG를 Orin에서 640x480으로 줄여 재인코딩.
             # DGX는 작은 640x480만 디코드(리사이즈 불필요) → 3-cam 30fps 목적.
             if head_resize is not None:
@@ -620,10 +648,19 @@ def main():
 
             now = time.time()
             if now - last_log >= args.fps_log_interval:
-                fps = frame_count / (now - last_log)
+                dt = now - last_log
+                fps = frame_count / dt
+                # 통합 콘텐츠 Hz 줄: 각 카메라 영상이 '실제로 새로 바뀌는' 속도.
+                # (publish fps와 다름 — publish는 루프 회전마다 나가고, 머리는
+                #  RPC 재탕분이 섞여 콘텐츠 Hz < publish Hz 인 게 정상.)
+                parts = [f"{args.head_mount}={head_content_count / dt:.1f}Hz"]
+                for m in sorted(content_hz.keys()):
+                    parts.append(f"{m}={content_hz[m]:.1f}Hz")
+                print(f"[3cam] content(new frames): {'  '.join(parts)}", flush=True)
                 print(f"[3cam] publish fps: {fps:.1f} | keys={sorted(images.keys())} "
                       f"| head errors={error_count}", flush=True)
                 frame_count = 0
+                head_content_count = 0
                 last_log = now
     finally:
         stop_event.set()
