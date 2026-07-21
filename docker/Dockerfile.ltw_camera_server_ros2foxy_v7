@@ -20,7 +20,8 @@
 #   2. CMD의 `--wrist-fps 30` 제거 — camera_forwarder_3cam.py argparse에
 #      존재하지 않는 인자다. run 스크립트가 항상 CMD를 덮어써서 드러나지
 #      않았을 뿐, 인자 없이 `docker run` 하면 v6는 즉시 죽는다.
-#   3. pyrealsense2는 유지하되 "현재 미사용"임을 명시 (섹션 5.5 참조).
+#   3. pyrealsense2는 유지 (섹션 5.5). 2026-07-21부터 머리 카메라
+#      --head-backend realsense 경로가 실제로 사용한다.
 #
 # [빌드 전 필수 실측 — 새 로봇에서]
 #   이 이미지의 버전 핀은 전부 "구 G1 Orin NX"의 실측값에 맞춰져 있다.
@@ -231,9 +232,9 @@ RUN python3 -m pip install --no-cache-dir \
         "msgpack==1.0.5"
 
 # -----------------------------------------------------------------------------
-# 5.5. libusb + pyrealsense2 — 현재 미사용, 의도적으로 보존
+# 5.5. libusb + pyrealsense2 — 머리 카메라 직결(--head-backend realsense)용
 # -----------------------------------------------------------------------------
-# ★ 중요: forwarder는 pyrealsense2를 import 하지 않는다. 손목 D405는 커널
+# ★ 손목(D405) 한정 주의: 손목은 여전히 pyrealsense2를 쓰지 않는다. 커널
 #   V4L2(cv2.VideoCapture)로 읽는다. 이유는 camera_forwarder_3cam.py 헤더에
 #   기록돼 있다 — 이 Jetson에서 pip pyrealsense2(RSUSB/libuvc 백엔드)는 장치
 #   열거는 되지만 wait_for_frames가 0프레임이다. 커널 uvcvideo가 D405 비디오
@@ -255,12 +256,31 @@ RUN python3 -m pip install --no-cache-dir \
 # --no-deps: 섹션 4.7에서 핀 고정한 numpy/opencv를 pyrealsense2가 다른
 #   버전으로 끌어올리지 못하게 막는다.
 # 검증: pyrealsense2에는 __version__ 속성이 없으므로 핵심 심볼로 확인한다.
+#
+# [버전 핀 = 2.55.1.6486 (librealsense v2.55.1), 2024-04-21 업로드]
+#   PyPI에 존재하는 **cp38 + aarch64 wheel의 마지막 버전**이다. 그 뒤 릴리스
+#   (2.56~2.58)는 cp39+ 만 빌드하므로, 무핀으로 두어도 이 Orin(Python 3.8)에서는
+#   pip이 결국 2.55.1.6486을 고른다 — 즉 핀은 동작을 바꾸지 않고 "왜 이 버전에
+#   멈춰 있는가"를 명시할 뿐이다. Python 3.8을 벗어나면 이 핀은 무효다.
+#   확인: pip3 show pyrealsense2   (rs.__version__ 속성은 없다)
+#
+# [이 wheel이 videohub과 공존하는 이유 — 머리 카메라 직결의 근거]
+#   Intel이 PyPI에 올리는 wheel은 커널 패치 없이 동작해야 하므로 RSUSB
+#   (libuvc/libusb) 백엔드로 빌드된다. 즉 커널 uvcvideo를 거치지 않고 USB
+#   인터페이스를 직접 claim 하므로, videohub_pc4가 /dev/videoN을 STREAMON
+#   독점(EBUSY)하고 있어도 무관하게 스트림을 연다 — videohub을 정지시킬
+#   필요가 없다. (Unitree 공식 문서가 realsense-viewer 사용 시 "카메라를
+#   점유한 프로세스를 먼저 kill 하라"고 안내하는 것은 apt/소스빌드판이
+#   V4L2 백엔드로 빌드되기 때문이며, pip wheel에는 해당되지 않는다.)
+ARG PYREALSENSE2_VERSION=2.55.1.6486
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libusb-1.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m pip install --no-cache-dir --no-deps "pyrealsense2" \
-    && python3 -c "import pyrealsense2 as rs; assert hasattr(rs, 'pipeline'); print('[v7] pyrealsense2 import OK (현재 forwarder는 미사용 — 섹션 5.5 참조)')"
+RUN python3 -m pip install --no-cache-dir --no-deps \
+        "pyrealsense2==${PYREALSENSE2_VERSION}" \
+    && python3 -c "import pyrealsense2 as rs; assert hasattr(rs, 'pipeline'); print('[v7] pyrealsense2 import OK (머리 --head-backend realsense 용)')"
 
 # -----------------------------------------------------------------------------
 # 6. Runtime env
