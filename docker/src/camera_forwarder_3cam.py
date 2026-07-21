@@ -20,15 +20,35 @@ ltw-camera-server v6 (0.9-foxy-3cam) 용 3-카메라 forwarder — V4L2 손목 �
         중계하는 D435i JPEG를 받는다. 1080p로만 오므로 --head-resize로 Orin에서
         디코드→리사이즈→재인코딩해야 하고, 실제 새 프레임은 ~15Hz다(RPC는 새
         프레임이 없으면 직전 바이트를 재반환한다).
-    realsense (신규):
-        librealsense(pyrealsense2)로 D435i를 직접 연다. RSUSB/libuvc 백엔드는
-        커널 uvcvideo를 거치지 않고 libusb로 USB 인터페이스를 claim 하므로,
-        videohub이 /dev/videoN을 STREAMON 독점(EBUSY)하고 있어도 공존한다
-        — videohub을 정지시킬 필요가 없다(공유 로봇 zero-impact 유지).
+    realsense (신규, 2026-07-21 — 이 로봇에서 아직 실측 미검증):
+        librealsense(pyrealsense2)로 D435i를 직접 연다. RSUSB 백엔드는 커널
+        uvcvideo를 거치지 않고 libusb로 USB 인터페이스를 claim 하므로, videohub이
+        /dev/videoN을 STREAMON 독점(EBUSY)하고 있어도 공존할 것으로 기대한다
+        — videohub을 정지시킬 필요가 없다.
         640x480@30을 bgr8로 **직접 요청**하므로 1080p 디코드·리사이즈·재인코딩이
         통째로 사라진다(--head-resize 불필요). 손목과 완전히 같은 파이프라인이
         되고, wedge 시 rs.device.hardware_reset()이라는 복구 수단이 생긴다.
         이 경로는 CycloneDDS/VideoClient를 아예 초기화하지 않는다.
+
+        ★ 채택 근거와 반대 증거를 둘 다 적어둔다 — 나중에 이 코드를 읽을 사람이
+          한쪽만 보고 오판하지 않도록:
+          [찬성] 다른 연구원이 videohub 비활성화 없이 librealsense로 head를
+                 안정 취득하는 데 성공했다(2026-07-21 증언). RSUSB가 uvcvideo를
+                 우회한다는 것은 librealsense 문서상으로도 맞다.
+          [반대] 바로 위 "[왜 V4L2인가]" 블록이 기록하듯, **이 Jetson에서 pip
+                 pyrealsense2로 D405를 열었을 때 열거는 됐지만 wait_for_frames가
+                 0프레임이었다** — uvcvideo가 물고 있어서라는 게 당시 결론이다.
+                 그게 맞다면 D435i에도 같은 일이 일어날 수 있다.
+          두 관측이 모순이므로, 실패하면 여기부터 의심할 것. 그때 확인 순서는
+          (1) query_devices()에 장치가 보이는가 (안 보이면 udev/권한 문제)
+          (2) 보이는데 pipeline.start()에서 죽는가 (인터페이스 claim 실패)
+          (3) start는 되는데 wait_for_frames만 0프레임인가 (D405 때와 동일 증상)
+        ★ 컨테이너 안에서 librealsense를 쓸 때 **호스트**에
+          99-realsense-libusb.rules 가 필요하다는 보고가 있다(librealsense
+          issue #12022, RSUSB 백엔드에도 해당). 우리는 컨테이너를 root로 돌리고
+          -v /dev:/dev + device-cgroup-rule 189 를 주므로 권한은 열려 있지만,
+          그래도 안 되면 이 udev 룰이 첫 번째 용의자다. 다만 호스트에 룰을
+          설치하는 것은 공유 로봇을 건드리는 일이라 별도 승인이 필요하다.
 
 아키텍처 (단일 프로세스, 스레드 병합)
 --------------------------------------
@@ -112,6 +132,41 @@ def _release_all_caps() -> None:
             except Exception:
                 pass
         _ACTIVE_CAPS.clear()
+
+
+# 열린 librealsense pipeline 레지스트리 — V4L2 cap과 같은 이유로 필요하다.
+# grabber 스레드의 finally에 pipeline.stop()이 있지만 **그것만으로는 부족하다**:
+# 스레드가 daemon이라 SIGTERM 처리 중 sys.exit()가 나면 finally가 실행되기 전에
+# 프로세스가 죽는다. 그러면 D435i가 스트리밍 중 고아로 남아 다음 실행이 장치를
+# 못 연다(그때는 USB 재열거나 물리 replug가 필요하다).
+_RS_LOCK = threading.Lock()
+_ACTIVE_PIPELINES: dict = {}
+
+
+def _register_pipeline(mount: str, pipeline) -> None:
+    with _RS_LOCK:
+        _ACTIVE_PIPELINES[mount] = pipeline
+
+
+def _unregister_pipeline(mount: str) -> None:
+    with _RS_LOCK:
+        _ACTIVE_PIPELINES.pop(mount, None)
+
+
+def _stop_all_pipelines() -> None:
+    with _RS_LOCK:
+        for pipeline in _ACTIVE_PIPELINES.values():
+            try:
+                pipeline.stop()
+            except Exception:
+                pass
+        _ACTIVE_PIPELINES.clear()
+
+
+def _release_all_devices() -> None:
+    """종료 시 모든 카메라를 깨끗이 놓는다(V4L2 STREAMOFF + rs pipeline stop)."""
+    _release_all_caps()
+    _stop_all_pipelines()
 
 
 # =============================================================================
@@ -456,6 +511,7 @@ def realsense_grabber(
                                       rs.format.bgr8, fps)
                     pipeline = rs.pipeline()
                     pipeline.start(cfg)
+                    _register_pipeline(mount, pipeline)
                     print(f"[3cam][{mount}] librealsense started "
                           f"serial={serial} {width}x{height}@{fps} bgr8", flush=True)
                     consec_fail = 0
@@ -475,7 +531,9 @@ def realsense_grabber(
 
             # ---- 프레임 취득 -------------------------------------------------
             try:
-                frames = pipeline.wait_for_frames(timeout_ms=5000)
+                # 위치인자로 넘긴다 — pybind11 바인딩의 키워드 인자명(timeout_ms)이
+                # 버전에 따라 다를 수 있어 TypeError로 죽는 것을 피한다.
+                frames = pipeline.wait_for_frames(5000)
                 color = frames.get_color_frame()
                 if not color:
                     consec_fail += 1
@@ -495,6 +553,7 @@ def realsense_grabber(
                         pipeline.stop()
                     except Exception:
                         pass
+                    _unregister_pipeline(mount)
                     pipeline = None
                     if consec_fail >= 30 and not did_reset:
                         did_reset = _rs_hardware_reset(rs, serial, mount)
@@ -514,6 +573,7 @@ def realsense_grabber(
                 pipeline.stop()
             except Exception:
                 pass
+        _unregister_pipeline(mount)
         print(f"[3cam][{mount}] librealsense stopped", flush=True)
 
 
@@ -698,7 +758,7 @@ def main():
     def _shutdown(signum, _frame):
         print(f"[3cam] signal {signum} → 카메라 release 후 종료", flush=True)
         stop_event.set()
-        _release_all_caps()
+        _release_all_devices()      # V4L2 STREAMOFF + rs pipeline stop
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, _shutdown)
@@ -798,7 +858,7 @@ def main():
         if not head_ready.wait(timeout=args.wrist_ready_timeout):
             print("[3cam] FATAL: 머리(realsense) 첫 프레임 대기 타임아웃", flush=True)
             stop_event.set()
-            _release_all_caps()
+            _release_all_devices()
             sys.exit(1)
         print("[3cam] 머리 카메라 준비 완료, forwarding 3-cam payload...", flush=True)
     else:

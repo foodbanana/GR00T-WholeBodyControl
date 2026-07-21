@@ -283,14 +283,27 @@ RUN python3 -m pip install --no-cache-dir \
 #   멈춰 있는가"를 명시할 뿐이다. Python 3.8을 벗어나면 이 핀은 무효다.
 #   확인: pip3 show pyrealsense2   (rs.__version__ 속성은 없다)
 #
-# [이 wheel이 videohub과 공존하는 이유 — 머리 카메라 직결의 근거]
-#   Intel이 PyPI에 올리는 wheel은 커널 패치 없이 동작해야 하므로 RSUSB
-#   (libuvc/libusb) 백엔드로 빌드된다. 즉 커널 uvcvideo를 거치지 않고 USB
-#   인터페이스를 직접 claim 하므로, videohub_pc4가 /dev/videoN을 STREAMON
-#   독점(EBUSY)하고 있어도 무관하게 스트림을 연다 — videohub을 정지시킬
-#   필요가 없다. (Unitree 공식 문서가 realsense-viewer 사용 시 "카메라를
-#   점유한 프로세스를 먼저 kill 하라"고 안내하는 것은 apt/소스빌드판이
-#   V4L2 백엔드로 빌드되기 때문이며, pip wheel에는 해당되지 않는다.)
+# [이 wheel로 videohub과 공존한다는 가설 — 머리 직결의 근거 / 2026-07-21 미검증]
+#   기대: Intel이 PyPI에 올리는 wheel은 커널 패치 없이 동작해야 하므로 RSUSB
+#   백엔드로 빌드되고, 그렇다면 커널 uvcvideo를 거치지 않고 libusb로 USB
+#   인터페이스를 직접 claim 하므로 videohub_pc4가 /dev/videoN을 STREAMON
+#   독점(EBUSY)하고 있어도 무관하게 스트림을 연다 — videohub 정지 불필요.
+#   (Unitree 계열 문서가 realsense-viewer 사용 시 "카메라를 점유한 프로세스를
+#   먼저 kill 하라"고 안내하는 것은 apt/소스빌드판이 V4L2 백엔드이기 때문이며,
+#   pip wheel에는 해당되지 않는다는 것이 이 가설의 요지다.)
+#
+#   ★ 그러나 위 섹션 5.5 첫 문단이 기록하듯, **이 Jetson에서 pip pyrealsense2로
+#     D405를 열었을 때 열거는 됐지만 wait_for_frames가 0프레임**이었다. 그 결론이
+#     맞다면 D435i에도 같은 일이 일어날 수 있다. 채택 근거는 "다른 연구원이
+#     videohub 비활성화 없이 성공했다"는 2026-07-21 증언이고, 우리가 이 로봇에서
+#     직접 확인한 적은 없다. 두 관측이 모순이므로 실패 시 여기부터 의심할 것.
+#     그래서 v7(1.0-foxy-3cam)을 롤백 자산으로 남겨둔 것이다.
+#
+#   ★ 컨테이너에서 librealsense를 쓸 때 **호스트**에 99-realsense-libusb.rules 가
+#     필요하다는 보고가 있다(librealsense issue #12022 — RSUSB 백엔드에도 해당).
+#     우리는 root + -v /dev:/dev + device-cgroup-rule 189 라 권한은 열려 있으나,
+#     장치가 query_devices()에 아예 안 보이면 이 udev 룰이 첫 번째 용의자다.
+#     단 호스트에 룰을 설치하는 것은 공유 로봇을 건드리는 일이라 별도 승인 필요.
 ARG PYREALSENSE2_VERSION=2.55.1.6486
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
