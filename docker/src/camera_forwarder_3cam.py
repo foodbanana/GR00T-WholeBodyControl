@@ -653,9 +653,33 @@ def wrist_encoder(
     content_count = 0      # 내용이 바뀐(=새로운) 프레임 수
     last_hash = None
     last_log = time.time()
+    def _tick_log(now, buf_kb=None):
+        """주기 로깅. ★ 새 프레임이 없을 때도 반드시 호출되어야 한다.
+        예전엔 '새 프레임 없음' 분기에서 continue 로 이 블록을 건너뛰어서,
+        wedge 가 나면 content_hz[mount] 가 마지막 정상값(예: 30.0)에 얼어붙었다.
+        그 결과 손목이 54초째 멈춰 있는데도 통합 로그는 'left_wrist=30.0Hz' 라고
+        찍었다 — wedge 를 감지하라고 만든 지표가 정확히 wedge 때 고장난 것이다.
+        (2026-07-21 실측: 데이터셋 left_wrist 정지 36.6%, 최장 6.0초)"""
+        nonlocal frame_count, content_count, last_log
+        dt = now - last_log
+        if dt < 5.0:
+            return
+        if content_hz is not None:
+            content_hz[mount] = content_count / dt
+        extra = f" ({buf_kb:.1f} KB/frame)" if buf_kb is not None else ""
+        line = (f"[3cam][{mount}] fps: {frame_count / dt:.1f} "
+                f"| content: {content_count / dt:.1f}Hz{extra}")
+        if content_count == 0:
+            line += "   ★ WEDGE — 새 프레임 없음"
+        print(line, flush=True)
+        frame_count = 0
+        content_count = 0
+        last_log = now
+
     while not stop_event.is_set():
         snap = raw_latest.get()
         if snap is None or snap[1] == last_ts:
+            _tick_log(time.time())   # 멈춰 있어도 0Hz 를 정직하게 보고한다
             time.sleep(0.002)  # 아직 새 프레임 없음 — 살짝 쉬고 재확인
             continue
         frame, ts = snap
@@ -670,17 +694,7 @@ def wrist_encoder(
         if h != last_hash:
             content_count += 1
             last_hash = h
-        now = time.time()
-        if now - last_log >= 5.0:
-            dt = now - last_log
-            if content_hz is not None:
-                content_hz[mount] = content_count / dt
-            print(f"[3cam][{mount}] fps: {frame_count / dt:.1f} "
-                  f"| content: {content_count / dt:.1f}Hz "
-                  f"({buf.size / 1024:.1f} KB/frame)", flush=True)
-            frame_count = 0
-            content_count = 0
-            last_log = now
+        _tick_log(time.time(), buf.size / 1024)
 
 
 # =============================================================================
