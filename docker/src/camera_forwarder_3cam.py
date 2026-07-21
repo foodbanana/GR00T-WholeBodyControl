@@ -151,7 +151,16 @@ def _register_cap(mount: str, cap) -> None:
         _ACTIVE_CAPS[mount] = cap
 
 
+def _unregister_cap(mount: str) -> None:
+    with _CAPS_LOCK:
+        _ACTIVE_CAPS.pop(mount, None)
+
+
 def _release_all_caps() -> None:
+    """최후 수단 — 소유 스레드가 제때 못 놓았을 때만 쓴다.
+    ★ 소유 grabber 가 cap.read() 안에 있는 동안 다른 스레드에서 release() 를
+      부르면 OpenCV(스레드 안전하지 않음)에서 멈출 수 있다. 평시에는 각
+      grabber 가 자기 finally 에서 놓게 하고, 이 함수는 그게 실패했을 때만 쓴다."""
     with _CAPS_LOCK:
         for cap in _ACTIVE_CAPS.values():
             try:
@@ -460,6 +469,7 @@ def v4l2_grabber(
     finally:
         if cap is not None:
             cap.release()
+        _unregister_cap(mount)
         print(f"[3cam][{mount}] V4L2 stopped", flush=True)
 
 
@@ -813,7 +823,6 @@ def main():
         #   finally 에서 하게 둔다.
         print(f"[3cam] signal {signum} → 카메라 release 후 종료", flush=True)
         stop_event.set()
-        _release_all_caps()         # V4L2 STREAMOFF (다른 스레드에서 안전)
 
         # ★ librealsense pipeline 정리를 **기다리지 않는다** (2026-07-21 결론)
         #   처음엔 grabber 가 pipeline.stop() 을 끝낼 때까지 3초 기다렸는데,
@@ -827,9 +836,22 @@ def main():
         #
         #   짧게(0.3초)만 기다리는 이유: 그 사이에 grabber 가 끝나면 깨끗한 stop 이
         #   덤으로 얻어진다. 안 끝나도 손해가 없으므로 기다림을 늘리지 않는다.
-        deadline = time.time() + 0.3
-        while time.time() < deadline and _ACTIVE_PIPELINES:
+        #   각 스레드는 자기 장치를 자기 finally 에서 놓고 레지스트리에서
+        #   스스로 빠진다. 여기서는 그게 끝나기를 잠깐 기다리기만 한다.
+        #   (V4L2 도 마찬가지다 — 핸들러가 cap.release() 를 직접 부르면 소유
+        #    grabber 가 cap.read() 안에 있을 때 OpenCV 에서 멈출 수 있다.
+        #    실측상 grabber 는 33ms 안에 read 에서 돌아오므로 금방 끝난다.)
+        deadline = time.time() + 1.0
+        while time.time() < deadline and (_ACTIVE_CAPS or _ACTIVE_PIPELINES):
             time.sleep(0.02)
+
+        # 최후 수단: 소유 스레드가 못 놓은 V4L2 만 여기서 정리한다. D405 는
+        # 스트리밍 중 고아로 남으면 다음 실행이 select timeout 으로 죽는 전례가
+        # 있어서(그래서 _ACTIVE_CAPS 가 존재한다) 이건 포기하지 않는다.
+        if _ACTIVE_CAPS:
+            print(f"[3cam] 미정리 V4L2 {sorted(_ACTIVE_CAPS)} → 강제 release",
+                  flush=True)
+            _release_all_caps()
 
         # os._exit: 인터프리터 종료 절차를 건너뛰고 즉시 죽는다. sys.exit()는
         # SystemExit 예외라서, 데몬 스레드가 C 확장 안에 갇혀 있으면 finalize
