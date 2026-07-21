@@ -28,8 +28,14 @@ camera_forwarder_3cam.py --head-backend realsense 가 실패했을 때, 어느 �
                             경우일 수 있다(librealsense issue #12022). 또는 USB
                             패스스루 누락. -v /dev:/dev 와 device-cgroup-rule을
                             확인할 것.
-    [3]에서 실패          : videohub이 정말로 USB 레벨까지 물고 있다는 뜻.
-                            RSUSB 우회 가설이 이 로봇에서는 성립하지 않는다.
+    [3]에서 실패(errno=16): **2026-07-21 실측에서 실제로 여기서 막혔다.**
+                            에러가 xioctl(VIDIOC_S_FMT) = V4L2 ioctl 이라는 점이
+                            결정적이다 — 이 pip wheel은 RSUSB가 아니라 **V4L2
+                            백엔드**로 빌드돼 있고, 그래서 cv2.VideoCapture와
+                            똑같이 videohub의 STREAMON 독점에 막힌다.
+                            -> 해결: 수집 중 videohub 정지(팀 승인됨). 또는
+                               librealsense를 -DFORCE_RSUSB_BACKEND=true 로
+                               소스빌드(pip wheel로는 공존 불가).
     [4]에서 0프레임       : D405 때와 같은 증상. start까지는 되는데 스트림이
                             안 흐르는 상태다. 이 경우 --head-fps를 낮추거나
                             (30 -> 15) 해상도를 낮춰 대역폭을 줄여보고, 그래도
@@ -215,13 +221,14 @@ def main():
         print("       --head-height/--head-fps 에 그대로 넣을 것)")
     else:
         print("판정: ❌ 머리 스트리밍 실패.")
-        print("      [3] start부터 실패했다면 videohub이 USB 레벨까지 물고 있다")
-        print("          = RSUSB 우회 가설이 이 로봇에선 성립하지 않는다.")
-        print("      [3]은 되는데 [4]가 0프레임이면 D405 때와 같은 증상이다.")
-        print("      다음 수순: 호스트에서 videohub을 잠시 멈춘 뒤 이 스크립트를")
-        print("      다시 돌려 본다 — 그때 되면 원인이 videohub으로 확정되고,")
-        print("      안 되면 udev/권한 쪽이다. (공유 로봇이므로 videohub 정지는")
-        print("      사전 합의 후에)")
+        print("      에러에 xioctl(VIDIOC_S_FMT) / errno=16 이 보이면 원인 확정이다:")
+        print("        이 pyrealsense2 wheel은 V4L2 백엔드라 videohub의 STREAMON")
+        print("        독점(EBUSY)을 우회하지 못한다. RSUSB 우회는 pip wheel로 불가.")
+        print("      -> 다음 수순: 수집 중 videohub 정지(2026-07-21 팀 승인).")
+        print("         정지 후 이 스크립트를 다시 돌려 [3][4]가 OK면 확정.")
+        print("         그래도 안 되면 그때는 udev/권한 쪽을 본다.")
+        print("      -> 정지 없이 공존이 꼭 필요하면 librealsense를 소스에서")
+        print("         -DFORCE_RSUSB_BACKEND=true 로 빌드해야 한다.")
     print("=" * 70)
 
 

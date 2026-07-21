@@ -20,35 +20,34 @@ ltw-camera-server v6 (0.9-foxy-3cam) 용 3-카메라 forwarder — V4L2 손목 �
         중계하는 D435i JPEG를 받는다. 1080p로만 오므로 --head-resize로 Orin에서
         디코드→리사이즈→재인코딩해야 하고, 실제 새 프레임은 ~15Hz다(RPC는 새
         프레임이 없으면 직전 바이트를 재반환한다).
-    realsense (신규, 2026-07-21 — 이 로봇에서 아직 실측 미검증):
-        librealsense(pyrealsense2)로 D435i를 직접 연다. RSUSB 백엔드는 커널
-        uvcvideo를 거치지 않고 libusb로 USB 인터페이스를 claim 하므로, videohub이
-        /dev/videoN을 STREAMON 독점(EBUSY)하고 있어도 공존할 것으로 기대한다
-        — videohub을 정지시킬 필요가 없다.
-        640x480@30을 bgr8로 **직접 요청**하므로 1080p 디코드·리사이즈·재인코딩이
-        통째로 사라진다(--head-resize 불필요). 손목과 완전히 같은 파이프라인이
-        되고, wedge 시 rs.device.hardware_reset()이라는 복구 수단이 생긴다.
+    realsense (2026-07-21 실측으로 전제가 바뀜 — 아래 필독):
+        librealsense(pyrealsense2)로 D435i를 직접 연다. 640x480@30을 bgr8로
+        **센서에 직접 요청**하므로 1080p 디코드·리사이즈·재인코딩이 통째로
+        사라진다(--head-resize 불필요). 손목과 완전히 같은 파이프라인이 되고,
+        wedge 시 rs.device.hardware_reset()이라는 복구 수단이 생긴다.
         이 경로는 CycloneDDS/VideoClient를 아예 초기화하지 않는다.
 
-        ★ 채택 근거와 반대 증거를 둘 다 적어둔다 — 나중에 이 코드를 읽을 사람이
-          한쪽만 보고 오판하지 않도록:
-          [찬성] 다른 연구원이 videohub 비활성화 없이 librealsense로 head를
-                 안정 취득하는 데 성공했다(2026-07-21 증언). RSUSB가 uvcvideo를
-                 우회한다는 것은 librealsense 문서상으로도 맞다.
-          [반대] 바로 위 "[왜 V4L2인가]" 블록이 기록하듯, **이 Jetson에서 pip
-                 pyrealsense2로 D405를 열었을 때 열거는 됐지만 wait_for_frames가
-                 0프레임이었다** — uvcvideo가 물고 있어서라는 게 당시 결론이다.
-                 그게 맞다면 D435i에도 같은 일이 일어날 수 있다.
-          두 관측이 모순이므로, 실패하면 여기부터 의심할 것. 그때 확인 순서는
-          (1) query_devices()에 장치가 보이는가 (안 보이면 udev/권한 문제)
-          (2) 보이는데 pipeline.start()에서 죽는가 (인터페이스 claim 실패)
-          (3) start는 되는데 wait_for_frames만 0프레임인가 (D405 때와 동일 증상)
-        ★ 컨테이너 안에서 librealsense를 쓸 때 **호스트**에
-          99-realsense-libusb.rules 가 필요하다는 보고가 있다(librealsense
-          issue #12022, RSUSB 백엔드에도 해당). 우리는 컨테이너를 root로 돌리고
-          -v /dev:/dev + device-cgroup-rule 189 를 주므로 권한은 열려 있지만,
-          그래도 안 되면 이 udev 룰이 첫 번째 용의자다. 다만 호스트에 룰을
-          설치하는 것은 공유 로봇을 건드리는 일이라 별도 승인이 필요하다.
+        ★★ videohub과 공존하지 않는다 — 2026-07-21 실측으로 확정 ★★
+          당초 "pip pyrealsense2 wheel은 RSUSB(libuvc/libusb) 백엔드라 커널
+          uvcvideo를 우회하므로 videohub이 STREAMON 독점(EBUSY)해도 공존한다"
+          고 적었으나, **틀렸다.** probe_realsense_head.py 실행 결과:
+
+              xioctl(VIDIOC_S_FMT) failed, errno=16 Device or resource busy
+
+          VIDIOC_S_FMT는 V4L2 ioctl이다. RSUSB였다면 libusb 계열 에러
+          (Failed to claim interface / LIBUSB_ERROR_BUSY)가 떠야 한다. 즉
+          **이 wheel은 V4L2 백엔드로 빌드돼 있고**, cv2.VideoCapture와 똑같이
+          videohub의 EBUSY에 막힌다. 위 "[왜 V4L2인가]" 블록의 D405 0프레임
+          기록과도 정확히 일치한다(그 결론이 옳았다).
+
+        ★ 따라서 realsense 백엔드를 쓰려면 **수집 중 videohub을 정지**해야 한다.
+          2026-07-21 팀 승인 사항:
+              수집 시작 전 -> videohub stop
+              수집 중      -> pyrealsense2가 D435i 독점
+              수집 종료 전 -> videohub 원복(재시작)
+              G1 전원 재투입 -> 다른 사용자에겐 원상태
+        ★ 진짜 공존이 필요해지면 librealsense를 소스에서
+          -DFORCE_RSUSB_BACKEND=true 로 빌드해야 한다(pip wheel로는 불가).
 
 아키텍처 (단일 프로세스, 스레드 병합)
 --------------------------------------
