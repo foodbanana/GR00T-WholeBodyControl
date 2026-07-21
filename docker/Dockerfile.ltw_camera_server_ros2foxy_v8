@@ -1,25 +1,27 @@
 # =============================================================================
 # ltw-camera-server:1.1-foxy-3cam   (v8 = v7 + librealsense 머리 직결)
 #
-# v7(1.0-foxy-3cam)과 섹션 1~5가 **바이트 동일**하고, 섹션 5.5의 pyrealsense2
-# 설치만 다르다(무핀 → 버전 핀). 즉 v7 이미지를 빌드해 둔 머신에서는 CycloneDDS
-# 소스빌드(섹션 3.5, 30~60분)를 포함한 앞 레이어가 전부 캐시 히트하고 5.5부터만
-# 다시 돈다 — v8 빌드는 몇 분이면 끝난다.
+# v7(1.0-foxy-3cam)과 섹션 1~5가 **바이트 동일**하고, 섹션 5.5만 다르다.
+# v7은 pip wheel(`pyrealsense2`)을 깔았고, v8은 **librealsense를 소스에서
+# -DFORCE_RSUSB_BACKEND=true 로 빌드**한다. 첫 명령어 차이가 섹션 5.5이므로
+# CycloneDDS 소스빌드(섹션 3.5, 30~60분)를 포함한 앞 레이어는 전부 캐시
+# 히트하고 5.5부터만 다시 돈다.
 #
-# [v7과의 관계 — 왜 파일을 나눴나]
-#   머리를 librealsense로 직결하는 경로는 2026-07-21 현재 **실측 미검증**이다
-#   (다른 연구원이 videohub 비활성화 없이 성공했다는 증언이 근거이나, 이 로봇
-#   에서 우리가 직접 확인한 적은 없다). 검증되지 않은 가설이 known-good을
-#   덮어쓰면 안 되므로 v7/1.0-foxy-3cam은 손대지 않고 보존한다.
+# [v7 대비 실질 변경 — 2개]
+#   1. 섹션 5.5: pip wheel -> librealsense 소스빌드(RSUSB 백엔드).
+#      ★ 이게 v8의 전부다. 이유는 섹션 5.5 주석에 실측 근거와 함께 상세히
+#        적어뒀다. 요약하면: pip wheel은 V4L2 백엔드라 L4T 순정 uvcvideo의
+#        XU 컨트롤 한계(-32 EPIPE)에 걸려 **프레임이 0개**였다. RSUSB는
+#        V4L2를 통째로 우회하므로 커널 패치 없이 이 문제를 넘는다.
+#   2. CMD에 --head-backend realsense 명시 (forwarder의 argparse 기본값은
+#      videohub이라 v7은 영향받지 않는다).
+#
+# [왜 파일을 나눴나 — v7을 안 건드리는 이유]
+#   머리 librealsense 직결은 2026-07-21 현재 **아직 프레임 취득 성공 전**이다.
+#   검증 안 된 경로가 known-good(v7 = 25Hz 채택본)을 덮어쓰면 문제 발생 시
+#   돌아갈 곳이 없어진다.
 #   ★ 태그가 반드시 달라야 한다(1.0 vs 1.1) — 같으면 v8 빌드가 v7 이미지를
 #     덮어써서 롤백 자산이 사라진다.
-#
-# [v7 대비 변경 사항 — 딱 하나]
-#   섹션 5.5: `pip install pyrealsense2` → `pyrealsense2==2.55.1.6486` 핀.
-#   PyPI에 cp38+aarch64 wheel이 존재하는 마지막 버전이라 무핀이어도 Python 3.8
-#   에서는 pip이 같은 것을 고른다 — 동작은 동일하고, "왜 이 버전에 멈춰 있는가"
-#   를 명시하는 문서화 목적의 핀이다. JetPack을 올려 Python이 3.8을 벗어나면
-#   이 핀이 즉시 실패하며 재검토를 강제한다(조용히 다른 버전이 깔리는 것보다 낫다).
 #
 #   ※ forwarder(camera_forwarder_3cam.py)는 v7과 **공유**한다. 복제하지 않는다.
 #     `--head-backend` 기본값이 videohub라서 같은 파일로 v7 동작이 그대로
@@ -29,9 +31,9 @@
 #       합쳐 forward. 머리는 두 경로 중 택1 —
 #         --head-backend videohub  : VideoClient RPC (v7과 동일, 1080p, ~15Hz)
 #         --head-backend realsense : librealsense 직결 (640x480@30 직접 요청)
-#       librealsense pip wheel은 RSUSB(libuvc/libusb) 백엔드로 빌드돼 커널
-#       uvcvideo를 우회하므로, videohub_pc4가 /dev/videoN을 STREAMON 독점
-#       (EBUSY)하고 있어도 공존한다 — **videohub을 정지시킬 필요가 없다.**
+#       RSUSB 백엔드는 커널 uvcvideo를 우회하므로 videohub과 공존할 여지가
+#       있으나 **미검증**이다. 2026-07-21 현재는 수집 중 videohub을 정지하는
+#       것을 전제로 한다(팀 승인: 수집 전 stop -> 수집 중 독점 -> 종료 전 원복).
 #       workstation의 run_data_exporter.py --record-wrist-cameras 와 짝을 이룬다.
 #
 # Target: Unitree G1 Orin NX (PC2, eth0 192.168.123.164/24, aarch64,
@@ -251,66 +253,95 @@ RUN python3 -m pip install --no-cache-dir \
         "msgpack==1.0.5"
 
 # -----------------------------------------------------------------------------
-# 5.5. libusb + pyrealsense2 — 머리 카메라 직결(--head-backend realsense)용
+# 5.5. librealsense 소스빌드 (RSUSB 백엔드) — 머리 D435i 직결의 핵심
 # -----------------------------------------------------------------------------
-# ★ 손목(D405) 한정 주의: 손목은 여전히 pyrealsense2를 쓰지 않는다. 커널
-#   V4L2(cv2.VideoCapture)로 읽는다. 이유는 camera_forwarder_3cam.py 헤더에
-#   기록돼 있다 — 이 Jetson에서 pip pyrealsense2(RSUSB/libuvc 백엔드)는 장치
-#   열거는 되지만 wait_for_frames가 0프레임이다. 커널 uvcvideo가 D405 비디오
-#   인터페이스를 점유해 libuvc가 못 뺏기 때문.
+# ★★ 왜 pip wheel이 아니라 소스빌드인가 — 2026-07-21 실측으로 확정 ★★
 #
-# 그럼에도 이 레이어를 남기는 이유: 손목 wedge(간헐 스트림 정지)의 근본
-# 해결책 후보가 "D405만 uvcvideo에서 언바인드 → RSUSB(pyrealsense2)로 전환"
-# 이고, 그 경로에서 이 레이어가 그대로 필요하다. raw V4L2에는 D405 펌웨어를
-# 되살릴 XU(extension unit) 리셋 명령이 없어서 물리 replug 외에 복구 수단이
-# 없다 — pyrealsense2로 가야 하는 진짜 이유는 성능이 아니라 복구 수단이다.
-# wheel 한 줄이라 빌드 비용이 싸므로 미리 깔아둔다.
+#   처음엔 `pip install pyrealsense2` (2.55.1.6486) 를 썼다. 결과:
+#     [1] 장치 3대 열거 OK        (udev/권한/USB 패스스루 전부 정상)
+#     [2] 640x480@30 bgr8 프로파일 노출 OK
+#     [3] pipeline.start()        OK  (videohub 정지 후. 정지 전엔 EBUSY)
+#     [4] wait_for_frames         ★ 0프레임 "Frame didn't arrive within 2000"
+#   그리고 커널이 이렇게 찍었다:
+#     uvcvideo: Failed to query (GET_CUR) UVC control 1 on unit 3: -32 (exp. 1024)
 #
-# librealsense apt 저장소는 쓰지 않는다: Intel repo의 InRelease를 서명한
-# 키(FB0B24895113F120)가 배포 중인 librealsense.pgp에 없어 apt-get update가
-# GPG 검증 실패(NO_PUBKEY)로 죽는다. 그리고 불필요하다 — pip wheel이
-# librealsense 런타임을 자체 번들한다. libusb-1.0-0만 우분투 main(별도 키
-# 불필요)에서 깔아둔다 — wheel이 USB 접근에 이 .so를 dlopen 할 수 있다.
+#   -32 = EPIPE = USB 컨트롤 엔드포인트 STALL. unit 3 = UVC의 XU(extension
+#   unit). librealsense는 XU 컨트롤로 센서를 설정하는데, **순정 uvcvideo는 이
+#   확장 컨트롤을 통과시키지 못한다.** 그래서 표준 UVC인 S_FMT까지는 되고
+#   스트리밍만 안 된다. librealsense 이슈 #5302 와 동일 증상이다.
 #
-# --no-deps: 섹션 4.7에서 핀 고정한 numpy/opencv를 pyrealsense2가 다른
-#   버전으로 끌어올리지 못하게 막는다.
-# 검증: pyrealsense2에는 __version__ 속성이 없으므로 핵심 심볼로 확인한다.
+#   USB를 논리적으로 replug(authorized 0->1)해도 결과가 같았다 — 즉 장치가
+#   wedge된 게 아니라 커널 드라이버의 구조적 한계다. 반면 호스트
+#   videohub_pc4와 손목의 cv2.VideoCapture는 잘 동작하는데, 그쪽은 평범한
+#   V4L2만 쓰고 XU를 건드리지 않기 때문이다.
 #
-# [버전 핀 = 2.55.1.6486 (librealsense v2.55.1), 2024-04-21 업로드]
-#   PyPI에 존재하는 **cp38 + aarch64 wheel의 마지막 버전**이다. 그 뒤 릴리스
-#   (2.56~2.58)는 cp39+ 만 빌드하므로, 무핀으로 두어도 이 Orin(Python 3.8)에서는
-#   pip이 결국 2.55.1.6486을 고른다 — 즉 핀은 동작을 바꾸지 않고 "왜 이 버전에
-#   멈춰 있는가"를 명시할 뿐이다. Python 3.8을 벗어나면 이 핀은 무효다.
-#   확인: pip3 show pyrealsense2   (rs.__version__ 속성은 없다)
+#   공식 Jetson 설치 문서가 제시하는 해법은 둘뿐이다:
+#     (a) 커널 uvcvideo 패치 (scripts/patch-realsense-ubuntu-L4T.sh)
+#         -> 공유 로봇의 커널 모듈을 교체하고 재부팅해야 한다. 다른 사용자
+#            전원에게 영향이 가므로 채택하지 않는다.
+#     (b) -DFORCE_RSUSB_BACKEND=true 로 소스빌드
+#         -> V4L2/uvcvideo를 통째로 우회하고 libusb로 직접 USB를 다룬다.
+#            커널을 안 건드리고 **컨테이너 안에서 완결**된다. 이걸 쓴다.
 #
-# [★ 이 wheel은 V4L2 백엔드다 — 2026-07-21 실측 확정, 당초 가설은 틀렸음]
-#   당초 이 자리에 "PyPI wheel은 커널 패치 없이 동작해야 하므로 RSUSB
-#   (libuvc/libusb) 백엔드로 빌드되고, 따라서 uvcvideo를 우회해 videohub과
-#   공존한다"고 적었다. **틀렸다.** probe_realsense_head.py 실측:
+#   ※ RSUSB의 알려진 제약: multi-cam 시나리오에 최적화돼 있지 않다. 우리는
+#     머리 1대만 librealsense로 열고 손목 D405 2대는 그대로 커널 V4L2
+#     (cv2.VideoCapture)로 읽으므로 이 제약에 해당하지 않는다.
 #
-#       xioctl(VIDIOC_S_FMT) failed, errno=16 Device or resource busy
+#   ※ 빌드 시간은 pip wheel보다 훨씬 길다(Orin NX에서 대략 20~40분). 대신
+#     섹션 1~5는 v7과 바이트 동일하므로 CycloneDDS 소스빌드(30~60분)를 포함한
+#     앞 레이어는 전부 캐시 히트한다.
 #
-#   VIDIOC_S_FMT는 V4L2 ioctl이다. RSUSB였다면 libusb 계열 에러가 떠야 한다.
-#   즉 이 wheel은 V4L2 백엔드이고, cv2.VideoCapture와 똑같이 videohub의
-#   STREAMON 독점(EBUSY)에 막힌다. 섹션 5.5 첫 문단의 D405 0프레임 기록이
-#   옳았던 것이다.
-#
-#   → 결론: **--head-backend realsense 는 수집 중 videohub 정지를 전제로 한다.**
-#     (2026-07-21 팀 승인: 수집 전 stop → 수집 중 독점 → 종료 전 원복 →
-#      G1 전원 재투입 시 다른 사용자에겐 원상태)
-#   → 진짜 공존이 필요하면 librealsense를 소스에서 -DFORCE_RSUSB_BACKEND=true
-#     로 빌드해야 한다. pip wheel로는 불가능하다. (Unitree 계열 문서가
-#     realsense-viewer 사용 시 "점유 프로세스를 먼저 kill 하라"고 안내하는
-#     것도 같은 이유이며, 우리에게도 그대로 적용된다.)
-ARG PYREALSENSE2_VERSION=2.55.1.6486
+# 버전: 직전까지 쓰던 pip wheel(2.55.1.6486)과 같은 릴리스 계열이라 API 차이가
+#   없다. 올리고 싶으면 이 ARG만 바꾼다.
+ARG LIBREALSENSE_VERSION=v2.55.1
 
+# 빌드 의존성. libusb-1.0-0-dev 가 RSUSB 백엔드의 핵심이다(런타임 libusb-1.0-0
+# 도 여기 포함된다). libudev-dev 는 장치 열거에 쓰인다.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libusb-1.0-0 \
+        libssl-dev \
+        libusb-1.0-0-dev \
+        libudev-dev \
+        pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m pip install --no-cache-dir --no-deps \
-        "pyrealsense2==${PYREALSENSE2_VERSION}" \
-    && python3 -c "import pyrealsense2 as rs; assert hasattr(rs, 'pipeline'); print('[v8] pyrealsense2 import OK (머리 --head-backend realsense 용)')"
+# pip wheel이 남아 있으면 소스빌드본을 가리므로 먼저 제거한다(없으면 무시).
+RUN python3 -m pip uninstall -y pyrealsense2 2>/dev/null || true
+
+WORKDIR /opt
+RUN git clone --depth 1 --branch ${LIBREALSENSE_VERSION} \
+    https://github.com/IntelRealSense/librealsense.git
+
+# FORCE_RSUSB_BACKEND=true : V4L2/uvcvideo 우회 — 이 레이어의 존재 이유
+# BUILD_PYTHON_BINDINGS    : pyrealsense2 를 소스에서 함께 빌드
+# BUILD_WITH_CUDA=false    : l4t-jetpack에 CUDA가 있지만 켜면 빌드가 크게
+#                            길어진다. 색변환은 어차피 OpenCV에서 하므로 이득 없음.
+# BUILD_EXAMPLES/GRAPHICAL : 불필요(헤드리스 컨테이너)
+WORKDIR /opt/librealsense/build
+RUN cmake .. \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DFORCE_RSUSB_BACKEND=true \
+        -DBUILD_PYTHON_BINDINGS=true \
+        -DPYTHON_EXECUTABLE=/usr/bin/python3 \
+        -DBUILD_EXAMPLES=false \
+        -DBUILD_GRAPHICAL_EXAMPLES=false \
+        -DBUILD_WITH_CUDA=false \
+        -DCMAKE_INSTALL_PREFIX=/usr/local \
+    && make -j"$(nproc)" \
+    && make install \
+    && ldconfig \
+    && rm -rf /opt/librealsense/build
+
+# 소스빌드된 pyrealsense2는 /usr/local/lib/python3.8/pyrealsense2 에 깔린다
+# (pip site-packages가 아니므로 PYTHONPATH로 잡아줘야 import 된다).
+ENV PYTHONPATH=/usr/local/lib/python3.8/pyrealsense2:/usr/local/lib/python3.8/dist-packages
+ENV LD_LIBRARY_PATH=/usr/local/lib:/opt/cyclonedds/install/lib:/opt/ros/foxy/lib:/opt/ros/foxy/lib/aarch64-linux-gnu
+
+# 검증 2단계: (1) import 되는가, (2) 진짜 RSUSB 빌드인가.
+# pyrealsense2에는 __version__ 이 없으므로 핵심 심볼과 링크 대상으로 확인한다.
+# RSUSB 빌드면 librealsense2.so 가 libusb에 링크돼 있다.
+RUN python3 -c "import pyrealsense2 as rs; assert hasattr(rs, 'pipeline'); print('[v8] pyrealsense2 (source build) OK ->', rs.__file__)" \
+    && ldd /usr/local/lib/librealsense2.so | grep -q libusb \
+    && echo "[v8] librealsense2.so -> libusb 링크 확인 = RSUSB 백엔드 OK"
 
 # -----------------------------------------------------------------------------
 # 6. Runtime env

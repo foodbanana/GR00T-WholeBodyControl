@@ -16,15 +16,18 @@
 #   ★ 문제가 생기면: 이 스크립트를 멈추고 run_..._v7.sh 를 그냥 실행하면 된다.
 #     v7 이미지(1.0-foxy-3cam)는 그대로 남아 있다.
 #
-# [왜 videohub을 정지시키지 않아도 되나]
-#   pip pyrealsense2 wheel은 RSUSB(libuvc/libusb) 백엔드로 빌드돼 커널
-#   uvcvideo를 우회한다. videohub_pc4가 /dev/videoN을 STREAMON 독점(EBUSY)
-#   하고 있어도 무관하게 스트림을 연다. (Unitree 공식 문서가 realsense-viewer
-#   사용 시 "점유 프로세스를 kill 하라"고 안내하는 것은 apt/소스빌드판이 V4L2
-#   백엔드이기 때문이며, pip wheel에는 해당되지 않는다.)
-#   단, libusb가 USB 인터페이스를 claim 할 때 videohub 피드가 잠시 끊길 수
-#   있다 — 2026-07-21 "문제 없다"고 확인받은 사항. 복구가 필요하면 호스트에서
-#   `sudo systemctl restart master_service`.
+# [videohub과의 관계 — 2026-07-21 실측 기준]
+#   v8 이미지의 librealsense는 RSUSB 백엔드(소스빌드)라 커널 uvcvideo를
+#   우회한다. 따라서 videohub과 공존할 여지가 있으나 **아직 미검증**이다.
+#   현재 전제는 "수집 중 videohub 정지"다(팀 승인).
+#     수집 시작 전 -> videohub 정지
+#     수집 중      -> 이 컨테이너가 D435i 독점
+#     수집 종료 전 -> videohub 원복
+#   ★ videohub_pc4 는 systemd 유닛이 아니라 master_service 가 런타임에 띄우는
+#     프로세스다(PPID=1). 죽이면 master_service 가 ~3초 뒤 자동으로 되살린다
+#     — 즉 원복은 공짜지만, 수집 중에는 계속 눌러둬야 한다.
+#     ※ 단, 짧은 간격으로 반복해서 죽이면 master_service 가 재시작을 포기하는
+#       경우가 관측됐다(2026-07-21). 그때는 재부팅해야 videohub이 돌아온다.
 #
 # 공유 로봇 원칙:
 #   - --privileged 는 쓰지 않는다. device-cgroup-rule로 video(major 81) /

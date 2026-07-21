@@ -40,14 +40,26 @@ ltw-camera-server v6 (0.9-foxy-3cam) 용 3-카메라 forwarder — V4L2 손목 �
           videohub의 EBUSY에 막힌다. 위 "[왜 V4L2인가]" 블록의 D405 0프레임
           기록과도 정확히 일치한다(그 결론이 옳았다).
 
-        ★ 따라서 realsense 백엔드를 쓰려면 **수집 중 videohub을 정지**해야 한다.
+          ★ 그 뒤 videohub을 정지해 EBUSY를 없앤 뒤에도 [4]가 0프레임이었고,
+            커널이 "uvcvideo: Failed to query (GET_CUR) UVC control 1 on
+            unit 3: -32" 를 찍었다. -32=EPIPE, unit 3=UVC XU. 즉 L4T 순정
+            uvcvideo가 librealsense의 XU 컨트롤을 통과시키지 못하는 것이
+            진짜 원인이다(librealsense #5302). USB 논리적 replug로도 동일 —
+            장치 wedge가 아니라 커널 드라이버의 구조적 한계다.
+          ★ 해결: v8 이미지(1.1-foxy-3cam)는 librealsense를 소스에서
+            -DFORCE_RSUSB_BACKEND=true 로 빌드해 V4L2/uvcvideo를 통째로
+            우회한다. 커널 패치(공유 로봇에 영향)를 피하는 유일한 길이다.
+            **이 forwarder를 --head-backend realsense 로 쓰려면 v8 이미지가
+            필요하다.** v7 이미지(pip wheel)로는 0프레임이다.
+
+        ★ videohub 정지 전제 (2026-07-21 팀 승인):
           2026-07-21 팀 승인 사항:
               수집 시작 전 -> videohub stop
               수집 중      -> pyrealsense2가 D435i 독점
               수집 종료 전 -> videohub 원복(재시작)
               G1 전원 재투입 -> 다른 사용자에겐 원상태
-        ★ 진짜 공존이 필요해지면 librealsense를 소스에서
-          -DFORCE_RSUSB_BACKEND=true 로 빌드해야 한다(pip wheel로는 불가).
+        ★ RSUSB 백엔드는 uvcvideo를 우회하므로 videohub과 공존할 여지가
+          있으나 미검증이다. 확인되면 위 정지 절차가 불필요해진다.
 
 아키텍처 (단일 프로세스, 스레드 병합)
 --------------------------------------
