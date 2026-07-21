@@ -1,33 +1,51 @@
 # =============================================================================
-# ltw-camera-server:1.0-foxy-3cam
+# ltw-camera-server:1.1-foxy-3cam   (v8 = v7 + librealsense 머리 직결)
 #
-# v6(0.9-foxy-3cam)와 기능적으로 동일하되, v5 이미지에 의존하지 않는
-# 단독(standalone) 빌드다. v6는 `FROM ltw-camera-server:0.8-foxy-videoclient`
-# 라서 v5 이미지가 로컬에 이미 존재하는 머신에서만 빌드됐다 — 즉 그 로봇을
-# 떠나는 순간 재현이 불가능했다. v7은 v5의 모든 레이어를 인라인해서 새 로봇
-# (또는 초기화된 Orin)에서 이 파일 하나로 처음부터 빌드된다.
+# v7(1.0-foxy-3cam)과 섹션 1~5가 **바이트 동일**하고, 섹션 5.5의 pyrealsense2
+# 설치만 다르다(무핀 → 버전 핀). 즉 v7 이미지를 빌드해 둔 머신에서는 CycloneDDS
+# 소스빌드(섹션 3.5, 30~60분)를 포함한 앞 레이어가 전부 캐시 히트하고 5.5부터만
+# 다시 돈다 — v8 빌드는 몇 분이면 끝난다.
 #
-# 결과: 머리(ego_view, VideoClient RPC) + 좌우 손목(D405, V4L2)을 하나의
-#       ZMQ 5555 페이로드로 합쳐 forward. workstation의
-#       run_data_exporter.py --record-wrist-cameras 와 짝을 이룬다.
+# [v7과의 관계 — 왜 파일을 나눴나]
+#   머리를 librealsense로 직결하는 경로는 2026-07-21 현재 **실측 미검증**이다
+#   (다른 연구원이 videohub 비활성화 없이 성공했다는 증언이 근거이나, 이 로봇
+#   에서 우리가 직접 확인한 적은 없다). 검증되지 않은 가설이 known-good을
+#   덮어쓰면 안 되므로 v7/1.0-foxy-3cam은 손대지 않고 보존한다.
+#   ★ 태그가 반드시 달라야 한다(1.0 vs 1.1) — 같으면 v8 빌드가 v7 이미지를
+#     덮어써서 롤백 자산이 사라진다.
+#
+# [v7 대비 변경 사항 — 딱 하나]
+#   섹션 5.5: `pip install pyrealsense2` → `pyrealsense2==2.55.1.6486` 핀.
+#   PyPI에 cp38+aarch64 wheel이 존재하는 마지막 버전이라 무핀이어도 Python 3.8
+#   에서는 pip이 같은 것을 고른다 — 동작은 동일하고, "왜 이 버전에 멈춰 있는가"
+#   를 명시하는 문서화 목적의 핀이다. JetPack을 올려 Python이 3.8을 벗어나면
+#   이 핀이 즉시 실패하며 재검토를 강제한다(조용히 다른 버전이 깔리는 것보다 낫다).
+#
+#   ※ forwarder(camera_forwarder_3cam.py)는 v7과 **공유**한다. 복제하지 않는다.
+#     `--head-backend` 기본값이 videohub라서 같은 파일로 v7 동작이 그대로
+#     재현되기 때문이다. (v6가 이미지 두 벌을 따로 관리하다 실패한 전례가 있다.)
+#
+# 결과: 머리(ego_view) + 좌우 손목(D405, V4L2)을 하나의 ZMQ 5555 페이로드로
+#       합쳐 forward. 머리는 두 경로 중 택1 —
+#         --head-backend videohub  : VideoClient RPC (v7과 동일, 1080p, ~15Hz)
+#         --head-backend realsense : librealsense 직결 (640x480@30 직접 요청)
+#       librealsense pip wheel은 RSUSB(libuvc/libusb) 백엔드로 빌드돼 커널
+#       uvcvideo를 우회하므로, videohub_pc4가 /dev/videoN을 STREAMON 독점
+#       (EBUSY)하고 있어도 공존한다 — **videohub을 정지시킬 필요가 없다.**
+#       workstation의 run_data_exporter.py --record-wrist-cameras 와 짝을 이룬다.
 #
 # Target: Unitree G1 Orin NX (PC2, eth0 192.168.123.164/24, aarch64,
 #         JetPack R35.3.1 / Ubuntu 20.04 focal, Python 3.8)
-#
-# [v6 대비 변경 사항]
-#   1. base를 v5 이미지 → nvcr.io/nvidia/l4t-jetpack:r35.3.1 로 교체하고
-#      v5의 섹션 1~8을 이 파일에 인라인 (동작 변화 없음, 순수 병합).
-#   2. CMD의 `--wrist-fps 30` 제거 — camera_forwarder_3cam.py argparse에
-#      존재하지 않는 인자다. run 스크립트가 항상 CMD를 덮어써서 드러나지
-#      않았을 뿐, 인자 없이 `docker run` 하면 v6는 즉시 죽는다.
-#   3. pyrealsense2는 유지하되 "현재 미사용"임을 명시 (섹션 5.5 참조).
 #
 # [빌드 전 필수 실측 — 새 로봇에서]
 #   이 이미지의 버전 핀은 전부 "구 G1 Orin NX"의 실측값에 맞춰져 있다.
 #   새 로봇에서 아래 3개가 다르면 그에 맞게 고쳐야 한다:
 #     1) videohub CycloneDDS 버전 (섹션 3.5의 0.10.2가 여기 걸려 있음)
 #          sudo ldd /proc/$(pgrep videohub_pc4)/exe | grep dds
-#     2) JetPack/L4T 버전 (r35.3.1 = Python 3.8 전제, 섹션 4.7/5 핀의 근거)
+#        ※ --head-backend realsense 만 쓴다면 이 핀은 무의미해진다(DDS 미사용).
+#          손목/머리 모두 DDS를 안 거치므로 섹션 3~4.6을 통째로 걷어낼 여지가
+#          있다 — 다만 videohub 폴백을 포기하는 것이므로 실측 검증 후에 하라.
+#     2) JetPack/L4T 버전 (r35.3.1 = Python 3.8 전제, 섹션 4.7/5/5.5 핀의 근거)
 #          cat /etc/nv_tegra_release
 #     3) D405 color 노드 by-id 경로 (시리얼은 동일하나 -video-indexN 은
 #        커널 열거 순서에 따라 바뀔 수 있다)
@@ -35,15 +53,17 @@
 #
 # [Build] (Orin NX에서, docker/ 를 build context로 — src/, config/ 상대 경로
 #          COPY 때문에 docker/ 루트로 지정해야 한다)
-#   docker build -f docker/Dockerfile.ltw_camera_server_ros2foxy_v7 \
-#                -t ltw-camera-server:1.0-foxy-3cam docker/
+#   docker build -f docker/Dockerfile.ltw_camera_server_ros2foxy_v8 \
+#                -t ltw-camera-server:1.1-foxy-3cam docker/
 #
 # [Run]
-#   ./docker/run_ltw_camera_server_ros2foxy_v7.sh
+#   ./docker/run_ltw_camera_server_ros2foxy_v8.sh          # 머리=realsense(기본)
+#   HEAD_BACKEND=videohub ./docker/run_..._v8.sh           # 머리=RPC(v7과 동일)
 #
-# [Rollback]
+# [Rollback] — v7 이미지는 그대로 남아 있으므로 즉시 복귀 가능
 #   docker rm -f ltw-camera-server 2>/dev/null
-#   docker rmi ltw-camera-server:1.0-foxy-3cam
+#   ./docker/run_ltw_camera_server_ros2foxy_v7.sh    # 1.0-foxy-3cam 그대로 사용
+#   docker rmi ltw-camera-server:1.1-foxy-3cam       # v8을 지울 때만
 #
 # [이력]
 #   0.1~0.7 의 시행착오(rclpy topic subscribe 실패 → VideoClient RPC 전환,
@@ -231,9 +251,9 @@ RUN python3 -m pip install --no-cache-dir \
         "msgpack==1.0.5"
 
 # -----------------------------------------------------------------------------
-# 5.5. libusb + pyrealsense2 — 현재 미사용, 의도적으로 보존
+# 5.5. libusb + pyrealsense2 — 머리 카메라 직결(--head-backend realsense)용
 # -----------------------------------------------------------------------------
-# ★ 중요: forwarder는 pyrealsense2를 import 하지 않는다. 손목 D405는 커널
+# ★ 손목(D405) 한정 주의: 손목은 여전히 pyrealsense2를 쓰지 않는다. 커널
 #   V4L2(cv2.VideoCapture)로 읽는다. 이유는 camera_forwarder_3cam.py 헤더에
 #   기록돼 있다 — 이 Jetson에서 pip pyrealsense2(RSUSB/libuvc 백엔드)는 장치
 #   열거는 되지만 wait_for_frames가 0프레임이다. 커널 uvcvideo가 D405 비디오
@@ -255,12 +275,31 @@ RUN python3 -m pip install --no-cache-dir \
 # --no-deps: 섹션 4.7에서 핀 고정한 numpy/opencv를 pyrealsense2가 다른
 #   버전으로 끌어올리지 못하게 막는다.
 # 검증: pyrealsense2에는 __version__ 속성이 없으므로 핵심 심볼로 확인한다.
+#
+# [버전 핀 = 2.55.1.6486 (librealsense v2.55.1), 2024-04-21 업로드]
+#   PyPI에 존재하는 **cp38 + aarch64 wheel의 마지막 버전**이다. 그 뒤 릴리스
+#   (2.56~2.58)는 cp39+ 만 빌드하므로, 무핀으로 두어도 이 Orin(Python 3.8)에서는
+#   pip이 결국 2.55.1.6486을 고른다 — 즉 핀은 동작을 바꾸지 않고 "왜 이 버전에
+#   멈춰 있는가"를 명시할 뿐이다. Python 3.8을 벗어나면 이 핀은 무효다.
+#   확인: pip3 show pyrealsense2   (rs.__version__ 속성은 없다)
+#
+# [이 wheel이 videohub과 공존하는 이유 — 머리 카메라 직결의 근거]
+#   Intel이 PyPI에 올리는 wheel은 커널 패치 없이 동작해야 하므로 RSUSB
+#   (libuvc/libusb) 백엔드로 빌드된다. 즉 커널 uvcvideo를 거치지 않고 USB
+#   인터페이스를 직접 claim 하므로, videohub_pc4가 /dev/videoN을 STREAMON
+#   독점(EBUSY)하고 있어도 무관하게 스트림을 연다 — videohub을 정지시킬
+#   필요가 없다. (Unitree 공식 문서가 realsense-viewer 사용 시 "카메라를
+#   점유한 프로세스를 먼저 kill 하라"고 안내하는 것은 apt/소스빌드판이
+#   V4L2 백엔드로 빌드되기 때문이며, pip wheel에는 해당되지 않는다.)
+ARG PYREALSENSE2_VERSION=2.55.1.6486
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libusb-1.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m pip install --no-cache-dir --no-deps "pyrealsense2" \
-    && python3 -c "import pyrealsense2 as rs; assert hasattr(rs, 'pipeline'); print('[v7] pyrealsense2 import OK (현재 forwarder는 미사용 — 섹션 5.5 참조)')"
+RUN python3 -m pip install --no-cache-dir --no-deps \
+        "pyrealsense2==${PYREALSENSE2_VERSION}" \
+    && python3 -c "import pyrealsense2 as rs; assert hasattr(rs, 'pipeline'); print('[v8] pyrealsense2 import OK (머리 --head-backend realsense 용)')"
 
 # -----------------------------------------------------------------------------
 # 6. Runtime env
@@ -279,6 +318,8 @@ ENV CYCLONEDDS_URI=file:///etc/cyclonedds.xml
 # -----------------------------------------------------------------------------
 # camera_forwarder.py(머리 전용, v5 CMD가 쓰던 것)도 함께 넣어둔다 — 손목
 # 문제를 배제하고 머리만 A/B로 확인할 때 이미지 교체 없이 CMD만 바꾸면 된다.
+# ※ forwarder는 v7과 같은 파일을 COPY 한다(복제본 없음). run 스크립트가
+#   bind-mount로 호스트 최신본을 덮어쓰므로 실제 실행되는 것도 같은 파일이다.
 WORKDIR /app
 COPY src/camera_forwarder_3cam.py /app/camera_forwarder_3cam.py
 COPY src/camera_forwarder.py /app/camera_forwarder.py
@@ -303,10 +344,16 @@ RUN { \
 # -----------------------------------------------------------------------------
 # - 이 컨테이너는 D405 USB 장치를 직접 연다. run 스크립트에서 USB
 #   패스스루(-v /dev:/dev + device-cgroup-rule)를 반드시 넘겨야 한다.
-#   (전용 run_ltw_camera_server_ros2foxy_v7.sh 참조)
-# - --network host 필요: VideoClient CycloneDDS discovery + ZMQ 5555.
+#   (전용 run_ltw_camera_server_ros2foxy_v8.sh 참조)
+# - --network host 필요: ZMQ 5555 노출. (--head-backend videohub 일 때는
+#   VideoClient CycloneDDS discovery에도 필요하다. realsense 경로는 DDS를
+#   쓰지 않지만 ZMQ 때문에 어차피 필요하다.)
 # - 이 컨테이너는 videohub_pc4/호스트 서비스를 절대 정지·재시작하지 않는다.
-#   D405는 우리 카메라이고 우리 노드만 open 하므로 다른 팀 피드에 영향 없다.
+#   --head-backend realsense 는 RSUSB(libusb)가 커널 uvcvideo를 우회하므로
+#   videohub을 정지시키지 않고 공존한다. 다만 libusb가 USB 인터페이스를
+#   claim 할 때 videohub 피드가 잠시 끊길 수 있다 — 2026-07-21 박사님이
+#   "문제 없다"고 확인해 준 사항이다. 복구가 필요하면 호스트에서
+#   `sudo systemctl restart master_service`.
 # - CMD를 JSON 배열(exec form)로 지정해 셸 없이 python3가 PID 1이 된다.
 #   ROS 2 setup.bash를 source할 필요도 없다 — 필요한 값은 전부 ENV에 있다.
 EXPOSE 5555
@@ -316,8 +363,17 @@ EXPOSE 5555
 # NOTE: v6 CMD에 있던 `--wrist-fps 30`은 제거했다 — argparse에 없는 인자다
 #       (run 스크립트가 CMD를 항상 덮어써서 드러나지 않았을 뿐, 인자 없이
 #       docker run 하면 v6는 unrecognized arguments로 즉사한다).
+# v8의 CMD는 --head-backend realsense 를 명시한다 — 이 이미지의 존재 이유가
+# 그것이기 때문이다(forwarder의 argparse 기본값은 videohub이라 v7이 영향받지
+# 않는다). videohub 폴백은 run 스크립트에서 HEAD_BACKEND=videohub 로 준다.
+# --head-serial 은 CMD에 넣지 않는다 — 로봇마다 다르고, 미지정 시 forwarder가
+# "이름에 405가 없는 장치"를 자동 선택하므로 손목 D405를 건드리지 않는다.
 CMD ["python3", "/app/camera_forwarder_3cam.py", \
      "--port", "5555", \
      "--head-mount", "ego_view", \
+     "--head-backend", "realsense", \
+     "--head-width", "640", \
+     "--head-height", "480", \
+     "--head-fps", "30", \
      "--wrist-width", "640", \
      "--wrist-height", "480"]

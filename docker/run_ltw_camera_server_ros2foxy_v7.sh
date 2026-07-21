@@ -81,25 +81,6 @@ if [[ "${NO_WRISTS:-}" == "1" ]]; then
 fi
 # 머리를 Orin에서 640x480으로 사전 리사이즈해 발행 (17.6 → 25Hz).
 # 사용: HEAD_RESIZE=640x480 ./docker/run_...v7.sh  (exporter는 --camera-decode-reduce 1)
-# 머리 백엔드 선택. HEAD_BACKEND=realsense 이면 librealsense로 D435i를 직결한다
-# (videohub 정지 불필요 — RSUSB/libusb가 커널 uvcvideo를 우회하므로 STREAMON
-#  독점과 무관하게 공존). 원하는 해상도를 센서에 직접 요청하므로 HEAD_RESIZE는
-# 불필요하며 지정해도 forwarder가 무시한다.
-#   HEAD_BACKEND=realsense HEAD_SERIAL=253843061423 ./docker/run_..._v7.sh
-if [[ "${HEAD_BACKEND:-videohub}" == "realsense" ]]; then
-    FWD_ARGS+=(--head-backend realsense
-               --head-width "${HEAD_WIDTH:-640}"
-               --head-height "${HEAD_HEIGHT:-480}"
-               --head-fps "${HEAD_FPS:-30}")
-    if [[ -n "${HEAD_SERIAL:-}" ]]; then
-        FWD_ARGS+=(--head-serial "$HEAD_SERIAL")
-    fi
-    echo "[ltw-camera-server] HEAD_BACKEND=realsense → librealsense 직결 " \
-         "(${HEAD_WIDTH:-640}x${HEAD_HEIGHT:-480}@${HEAD_FPS:-30}, serial=${HEAD_SERIAL:-auto})"
-    echo "[ltw-camera-server]   videohub_pc4는 건드리지 않는다 (공존)"
-else
-    echo "[ltw-camera-server] HEAD_BACKEND=videohub (기본, VideoClient RPC)"
-fi
 if [[ -n "${HEAD_RESIZE:-}" ]]; then
     FWD_ARGS+=(--head-resize "$HEAD_RESIZE")
     echo "[ltw-camera-server] HEAD_RESIZE=$HEAD_RESIZE → 머리 사전 리사이즈(Orin 디코드+리사이즈+재인코딩)"
