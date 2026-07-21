@@ -350,15 +350,33 @@ RUN cmake .. \
     && ldconfig \
     && rm -rf /opt/librealsense/build
 
-# 소스빌드된 pyrealsense2는 /usr/local/lib/python3.8/pyrealsense2 에 깔린다
-# (pip site-packages가 아니므로 PYTHONPATH로 잡아줘야 import 된다).
-ENV PYTHONPATH=/usr/local/lib/python3.8/pyrealsense2:/usr/local/lib/python3.8/dist-packages
+# -----------------------------------------------------------------------------
+# 5.6. pyrealsense2 배치 + 검증
+# -----------------------------------------------------------------------------
+# ★ 2026-07-21 실패에서 배운 것: librealsense의 Python 바인딩 설치 경로는
+#   버전/플랫폼에 따라 달라진다(`lib/python3.8/pyrealsense2/`,
+#   `lib/python3.8/site-packages/`, `lib/python3/dist-packages/` 등).
+#   경로를 추측해서 PYTHONPATH에 박았더니 `import pyrealsense2` 는 성공하는데
+#   `hasattr(rs, 'pipeline')` 이 False 였다 — 진짜 확장 모듈이 아니라 이름만
+#   같은 빈 디렉터리(namespace package)를 집은 것이다.
+#
+#   그래서 경로를 고정하지 않고, **빌드 산출물을 찾아서 표준 위치로 복사**한 뒤
+#   거기 하나만 PYTHONPATH에 넣는다. 실패해도 find 결과가 로그에 남아 다음
+#   수정이 추측이 아니게 된다.
+ENV PYTHONPATH=/usr/local/lib/python3.8/dist-packages
 ENV LD_LIBRARY_PATH=/usr/local/lib:/opt/cyclonedds/install/lib:/opt/ros/foxy/lib:/opt/ros/foxy/lib/aarch64-linux-gnu
 
-# 검증 2단계: (1) import 되는가, (2) 진짜 RSUSB 빌드인가.
-# pyrealsense2에는 __version__ 이 없으므로 핵심 심볼과 링크 대상으로 확인한다.
-# RSUSB 빌드면 librealsense2.so 가 libusb에 링크돼 있다.
-RUN python3 -c "import pyrealsense2 as rs; assert hasattr(rs, 'pipeline'); print('[v8] pyrealsense2 (source build) OK ->', rs.__file__)" \
+RUN set -x \
+    && echo "=== [v8] librealsense Python 산출물 탐색 ===" \
+    && (find /usr/local /usr/lib /usr/share \
+             \( -name "*pyrealsense2*" -o -name "*pybackend2*" \) 2>/dev/null || true) \
+    && echo "=== [v8] dist-packages 로 복사 ===" \
+    && mkdir -p /usr/local/lib/python3.8/dist-packages \
+    && find /usr/local \( -name "pyrealsense2*.so" -o -name "pybackend2*.so" \) \
+            -exec cp -v {} /usr/local/lib/python3.8/dist-packages/ \; \
+    && echo "=== [v8] import 검증 ===" \
+    && python3 -c "import pyrealsense2 as rs; print('[v8] module file =', rs.__file__); assert hasattr(rs, 'pipeline'), 'pipeline 심볼 없음 — 위 find 출력에서 실제 .so 위치를 확인할 것'; print('[v8] pyrealsense2 (source build) OK')" \
+    && echo "=== [v8] RSUSB 백엔드 확인 ===" \
     && ldd /usr/local/lib/librealsense2.so | grep -q libusb \
     && echo "[v8] librealsense2.so -> libusb 링크 확인 = RSUSB 백엔드 OK"
 
