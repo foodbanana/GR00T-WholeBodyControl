@@ -16,14 +16,16 @@
 #   ★ 문제가 생기면: 이 스크립트를 멈추고 run_..._v7.sh 를 그냥 실행하면 된다.
 #     v7 이미지(1.0-foxy-3cam)는 그대로 남아 있다.
 #
-# [videohub 과 완전 공존 — 2026-07-21 최종 확인]
-#   videohub_pc4 가 /dev/video4 를 물고 있는 상태 그대로 실행해도
-#     videohub 생존 + ego_view 29.0~29.4Hz + 손목 30.0Hz + head errors 0
-#   이다. v8 의 librealsense 는 RSUSB(libusb) 백엔드라 커널 uvcvideo 를 아예
-#   거치지 않기 때문이다.
-#   => **videohub 을 정지시키지 않는다. 수집 후 재부팅도 필요 없다.**
-#      다른 사용자 환경에 영향 0.
-#   ※ v7 이미지(pip wheel)는 V4L2 백엔드라 이 성질이 없다 — v8 전용 이점이다.
+# [videohub 과의 공존 — 불안정 (2026-07-21 관측)]
+#   관측된 사실만:
+#     머리만 RSUSB  -> videohub 최소 20초 생존, ego 29Hz 정상
+#     3대 전부 RSUSB + 수 분 -> videohub 사라짐
+#   어느 시점에 죽는지는 모른다. **언젠가 밀려난다고 가정하고 운용할 것.**
+#   - 우리가 명시적으로 정지시키지는 않는다(그럴 필요 없음).
+#   - 밀려나도 우리 파이프라인은 정상(실측 ego 29Hz / 손목 30Hz).
+#   - 복구는 재부팅. 부팅 시 videohub 자동 기동 + /dev/video4=D435i 원복 확인됨.
+#   - ★ videohub 수동 기동 금지 — /dev/video4 가 손목 D405 를 가리키게 되면
+#     우리 손목을 점유한다.
 #
 # 공유 로봇 원칙:
 #   - --privileged 는 쓰지 않는다. device-cgroup-rule로 video(major 81) /
