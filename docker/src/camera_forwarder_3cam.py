@@ -58,18 +58,23 @@ ltw-camera-server v6 (0.9-foxy-3cam) 용 3-카메라 forwarder — V4L2 손목 �
           videohub RPC 경로(~15Hz) 대비 약 2배이고, 1080p 디코드->리사이즈->
           재인코딩이 사라져 Orin CPU도 크게 줄었다.
 
-        ★ videohub 과의 관계 — "공존"이 아니라 "밀어내기"다
-          RSUSB 가 USB 인터페이스를 claim 하면 커널 uvcvideo 가 detach 되고,
-          videohub_pc4 의 V4L2 스트림이 끊겨 프로세스가 사라진다. 그리고
-          **자동으로 되살아나지 않는다**(master_service 가 재시작을 포기함).
-          이유: 이 과정에서 D435i 가 여러 번 재열거되어 /dev/videoN 번호가
-          밀리는데, master_service 는 videohub 을 `/dev/video4` 로 하드코딩해
-          띄우기 때문이다. 실제로 실행 후 /dev/video4 는 **손목 D405** 를
-          가리키게 됐다 — 이 상태에서 videohub 을 수동 기동하면 머리가 아니라
-          손목을 점유하므로 **절대 하지 말 것.**
-          => videohub 복구는 **재부팅**이 유일하고 확실한 방법이다.
-             (2026-07-21 팀 승인 라이프사이클의 "G1 전원 재투입 -> 원상태"에
-              해당한다.)
+        ★★ videohub 과 완전 공존한다 — 2026-07-21 최종 확인 ★★
+          v8 이미지(RSUSB 소스빌드)로, videohub_pc4 가 /dev/video4 를 물고 있는
+          상태 그대로 실행한 결과:
+            videohub_pc4 (PID 5236) 계속 생존
+            ego_view 29.0~29.4Hz / left,right_wrist 30.0Hz / head errors 0
+          RSUSB 는 libusb 로 USB 인터페이스를 직접 다루고 커널 uvcvideo 를 아예
+          거치지 않으므로 videohub 의 V4L2 STREAMON 독점과 무관하다.
+          => **videohub 을 정지시킬 필요가 없고 수집 후 재부팅도 불필요하다.**
+             다른 사용자 환경에 영향 0.
+
+          ※ 오해 기록(반복 방지):
+            앞서 "RSUSB 가 videohub 을 밀어낸다 / 복구는 재부팅뿐"이라고 적었던
+            것은 **pip wheel(V4L2 백엔드) 이미지 기준의 관측**이었고 소스빌드
+            RSUSB 에는 해당하지 않는다. 문제는 RSUSB 개념이 아니라 "pip wheel 이
+            RSUSB 일 것"이라는 검증 안 된 가정이었다.
+            (참고: 재부팅하면 videohub 자동 기동 + /dev/video4 = D435i 로 원복됨을
+             2026-07-21 확인했다 — 만약을 위한 원복 수단으로는 유효하다.)
 
         ★ 손목 노드도 같은 이유로 밀린다 — 그러나 문제되지 않는다.
           실측에서 머리 시작 직후 손목이 REQBUFS errno=19 로 실패했지만,

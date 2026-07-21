@@ -16,18 +16,14 @@
 #   ★ 문제가 생기면: 이 스크립트를 멈추고 run_..._v7.sh 를 그냥 실행하면 된다.
 #     v7 이미지(1.0-foxy-3cam)는 그대로 남아 있다.
 #
-# [videohub과의 관계 — 2026-07-21 실측 기준]
-#   v8 이미지의 librealsense는 RSUSB 백엔드(소스빌드)라 커널 uvcvideo를
-#   우회한다. 따라서 videohub과 공존할 여지가 있으나 **아직 미검증**이다.
-#   현재 전제는 "수집 중 videohub 정지"다(팀 승인).
-#     수집 시작 전 -> videohub 정지
-#     수집 중      -> 이 컨테이너가 D435i 독점
-#     수집 종료 전 -> videohub 원복
-#   ★ videohub_pc4 는 systemd 유닛이 아니라 master_service 가 런타임에 띄우는
-#     프로세스다(PPID=1). 죽이면 master_service 가 ~3초 뒤 자동으로 되살린다
-#     — 즉 원복은 공짜지만, 수집 중에는 계속 눌러둬야 한다.
-#     ※ 단, 짧은 간격으로 반복해서 죽이면 master_service 가 재시작을 포기하는
-#       경우가 관측됐다(2026-07-21). 그때는 재부팅해야 videohub이 돌아온다.
+# [videohub 과 완전 공존 — 2026-07-21 최종 확인]
+#   videohub_pc4 가 /dev/video4 를 물고 있는 상태 그대로 실행해도
+#     videohub 생존 + ego_view 29.0~29.4Hz + 손목 30.0Hz + head errors 0
+#   이다. v8 의 librealsense 는 RSUSB(libusb) 백엔드라 커널 uvcvideo 를 아예
+#   거치지 않기 때문이다.
+#   => **videohub 을 정지시키지 않는다. 수집 후 재부팅도 필요 없다.**
+#      다른 사용자 환경에 영향 0.
+#   ※ v7 이미지(pip wheel)는 V4L2 백엔드라 이 성질이 없다 — v8 전용 이점이다.
 #
 # 공유 로봇 원칙:
 #   - --privileged 는 쓰지 않는다. device-cgroup-rule로 video(major 81) /
