@@ -88,7 +88,23 @@ ltw-camera-server v6 (0.9-foxy-3cam) 용 3-카메라 forwarder — V4L2 손목 �
         cv2.VideoCapture(color_node, CAP_V4L2) -> BGR -> JPEG 인코딩
           -> LatestFrame 슬롯에 (jpeg_bytes, ts) 저장 (덮어쓰기)
 
-손목 노드 지정 (--left-node / --right-node)
+[손목 백엔드 2종 — --wrist-backend]  (2026-07-21 신규, 기본 v4l2)
+    v4l2      : cv2.VideoCapture(by-id color 노드). 기존 known-good.
+    realsense : 머리와 동일하게 librealsense(RSUSB) 직결. v8 이미지 필요.
+        도입 이유는 성능이 아니라 **복구 수단**이다. D405 wedge 는 오래된 미해결
+        문제인데(2026-07-21 수집에서도 left_wrist 가 6초 정지해 데이터가 오염됐다),
+        raw V4L2 에는 D405 펌웨어를 되살릴 수단이 없다:
+          - USBDEVFS_RESET  -> 실측에서 복구 실패
+          - sysfs authorized 토글(유일하게 통하는 방법) -> 컨테이너에서 /sys 가
+            읽기 전용이라 불가
+        librealsense 로 열면 rs.device.hardware_reset() 을 컨테이너 안에서 쓸 수
+        있고, 커널 uvcvideo 를 아예 안 거치므로 wedge 자체가 줄 여지도 있다.
+        ⚠️ 단 Intel 문서가 "RSUSB 는 multi-cam 에 최적화돼 있지 않다"고 명시한다.
+           머리까지 3대를 RSUSB 로 돌리는 것은 미검증이므로 실측 확인이 필요하다.
+        ★ --left-wrist-serial / --right-wrist-serial 에 넣는 값은 by-id 경로의
+          USB 시리얼이 **아니라** librealsense 가 보고하는 값이다(--list-devices).
+
+손목 노드 지정 (--left-node / --right-node) — v4l2 백엔드 전용
     다음 중 아무거나 받는다:
       * /dev/videoN                              (직접 노드 — 재부팅 시 번호 바뀔 수 있음)
       * /dev/v4l/by-id/...-video-indexN          (재부팅에도 안정적, 권장)
@@ -476,32 +492,75 @@ def v4l2_grabber(
 # =============================================================================
 # librealsense (RSUSB) reader 스레드 — 머리 D435i 직결
 # =============================================================================
-def _rs_pick_head_serial(rs, want_serial: str):
-    """연결된 RealSense 중 머리로 쓸 장치의 시리얼을 고른다.
-
-    want_serial이 주어지면 그것이 실재하는지 확인만 하고 그대로 쓴다.
-    미지정 시 D405가 **아닌** 첫 장치를 고른다 — D405 2대는 손목이고 V4L2로
-    이미 열려 있으므로 librealsense가 절대 건드리면 안 된다."""
-    ctx = rs.context()
+def _rs_devices(rs):
+    """librealsense가 보는 장치를 [(name, serial), ...] 로 반환."""
     found = []
-    for dev in ctx.query_devices():
-        try:
-            name = dev.get_info(rs.camera_info.name)
-            serial = dev.get_info(rs.camera_info.serial_number)
-        except Exception:
-            continue
-        found.append((name, serial))
+    try:
+        for dev in rs.context().query_devices():
+            try:
+                found.append((dev.get_info(rs.camera_info.name),
+                              dev.get_info(rs.camera_info.serial_number)))
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"[3cam] librealsense 장치 열거 실패: {type(e).__name__}: {e}",
+              flush=True)
+    return found
+
+
+def _rs_pick_head_serial(rs, want_serial: str):
+    """머리로 쓸 장치의 시리얼을 고른다.
+
+    want_serial이 주어지면 실재 여부만 확인하고 그대로 쓴다.
+    미지정 시 D405가 **아닌** 첫 장치를 고른다(D405는 손목이므로 제외)."""
+    found = _rs_devices(rs)
     print(f"[3cam][head] librealsense 장치 목록: {found}", flush=True)
     if want_serial:
-        if any(s == want_serial for _n, s in found):
-            return want_serial
-        print(f"[3cam][head] 경고: 지정 시리얼 {want_serial} 미발견 — 그대로 시도",
-              flush=True)
+        if not any(s == want_serial for _n, s in found):
+            print(f"[3cam][head] 경고: 지정 시리얼 {want_serial} 미발견 — 그대로 시도",
+                  flush=True)
         return want_serial
     for name, serial in found:
-        if "405" not in name:          # D405 = 손목(V4L2 점유 중), 제외
+        if "405" not in name:
             return serial
     return None
+
+
+def _rs_pick_wrist_serials(rs):
+    """손목으로 쓸 D405 시리얼을 이름 기준으로 골라 **정렬**해 반환.
+
+    ★ 주의: 여기서 나오는 시리얼은 librealsense 가 보고하는 값이고,
+      /dev/v4l/by-id 경로에 쓰이는 USB 디스크립터 시리얼과 **다른 값**이다.
+      (실측 2026-07-21: by-id 255323073651/255323071827 <-> librealsense
+       260322270228/260422272337). 두 값 사이의 대응은 알 수 없으므로 자동배정은
+      단순 정렬이고, 좌우가 바뀌면 --left-wrist-serial/--right-wrist-serial 로
+      고정해야 한다(영상을 눈으로 보고 판단)."""
+    return sorted(serial for name, serial in _rs_devices(rs) if "405" in name)
+
+
+def _rs_print_color_profiles(rs, serial: str, mount: str) -> None:
+    """start 실패 시 이 장치가 실제로 지원하는 color 프로파일을 찍어준다.
+
+    D405 는 머리 D435i 와 지원 조합이 다를 수 있어(해상도/포맷/fps), 요청이
+    거부되면 무엇으로 바꿔야 하는지 로그만 보고 판단할 수 있어야 한다."""
+    try:
+        for dev in rs.context().query_devices():
+            if dev.get_info(rs.camera_info.serial_number) != serial:
+                continue
+            seen = set()
+            for sensor in dev.query_sensors():
+                for prof in sensor.get_stream_profiles():
+                    if prof.stream_type() != rs.stream.color:
+                        continue
+                    vp = prof.as_video_stream_profile()
+                    seen.add((vp.width(), vp.height(), prof.fps(), str(prof.format())))
+            print(f"[3cam][{mount}] 지원 color 프로파일({serial}):", flush=True)
+            for w, h, f, fmt in sorted(seen):
+                print(f"[3cam][{mount}]    {w}x{h} {f}fps {fmt}", flush=True)
+            return
+    except Exception as e:
+        print(f"[3cam][{mount}] 프로파일 조회 실패: {type(e).__name__}: {e}",
+              flush=True)
 
 
 def realsense_grabber(
@@ -556,6 +615,8 @@ def realsense_grabber(
                     pipeline = None
                     print(f"[3cam][{mount}] librealsense start 실패: "
                           f"{type(e).__name__}: {e}", flush=True)
+                    if consec_fail == 0:      # 첫 실패 때 한 번만 진단 출력
+                        _rs_print_color_profiles(rs, serial, mount)
                     # 첫 시작부터 계속 실패하면 한 번은 펌웨어 리셋을 걸어본다.
                     consec_fail += 1
                     if consec_fail >= 3 and not did_reset:
@@ -733,6 +794,24 @@ def main():
                         help="left_wrist color 노드(/dev/videoN | by-id 경로 | udev serial)")
     parser.add_argument("--right-node", default=None,
                         help="right_wrist color 노드(위와 동일 형식)")
+    parser.add_argument("--wrist-backend", default="v4l2",
+                        choices=["v4l2", "realsense"],
+                        help="손목 D405 취득 경로. v4l2=cv2.VideoCapture(기본, "
+                             "기존 known-good). realsense=librealsense 직결 — "
+                             "커널 uvcvideo를 우회하므로 wedge에서 벗어날 여지가 "
+                             "있고, 무엇보다 hardware_reset()이라는 복구 수단이 "
+                             "생긴다(USBDEVFS_RESET은 2026-07-21 실측에서 wedge "
+                             "복구에 실패했고, 유효한 sysfs authorized 토글은 "
+                             "컨테이너에서 /sys가 ro라 쓸 수 없다). "
+                             "★ v8 이미지(RSUSB 소스빌드) 필요.")
+    parser.add_argument("--left-wrist-serial", default=None,
+                        help="realsense 백엔드에서 left_wrist로 쓸 D405 시리얼. "
+                             "★ by-id 경로의 USB 시리얼이 아니라 librealsense가 "
+                             "보고하는 값이다(--list-devices로 확인).")
+    parser.add_argument("--right-wrist-serial", default=None,
+                        help="realsense 백엔드에서 right_wrist로 쓸 D405 시리얼")
+    parser.add_argument("--wrist-fps", type=int, default=30,
+                        help="realsense 백엔드의 손목 color 요청 fps")
     parser.add_argument("--wrist-width", type=int, default=640)
     parser.add_argument("--wrist-height", type=int, default=480)
     parser.add_argument("--jpeg-quality", type=int, default=80)
@@ -761,11 +840,15 @@ def main():
         # 그대로 복사하면 된다. videohub이 떠 있어도 열거는 된다.
         try:
             import pyrealsense2 as rs
-            print("\n[3cam] librealsense 장치(머리 --head-serial 용):", flush=True)
-            for dev in rs.context().query_devices():
-                print(f"[3cam]   {dev.get_info(rs.camera_info.name)}  "
-                      f"serial={dev.get_info(rs.camera_info.serial_number)}",
-                      flush=True)
+            print("\n[3cam] librealsense 장치 — ★ 여기 시리얼은 위 by-id 의 USB "
+                  "시리얼과 **다른 값**이다(계층이 다름). 헷갈리지 말 것:",
+                  flush=True)
+            for name, serial in _rs_devices(rs):
+                use = "--head-serial" if "405" not in name else \
+                      "--left-wrist-serial / --right-wrist-serial"
+                print(f"[3cam]   {name}  serial={serial}   -> {use}", flush=True)
+            print("[3cam]   (손목을 realsense 로 쓰려면 --wrist-backend realsense)",
+                  flush=True)
         except Exception as e:
             print(f"[3cam] librealsense 열거 실패: {type(e).__name__}: {e}", flush=True)
         sys.exit(0)
@@ -877,7 +960,75 @@ def main():
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
 
-    if not args.no_wrists:
+    use_rs_wrists = (args.wrist_backend == "realsense")
+
+    if not args.no_wrists and use_rs_wrists:
+        # -------- 손목 = librealsense(RSUSB) 직결 --------
+        # 머리와 완전히 같은 realsense_grabber 를 재사용한다. 차이는 대상 장치
+        # 선택(D405)과 좌우 배정뿐이다.
+        import pyrealsense2 as _rs_probe
+        serial_map = {}
+        if args.left_wrist_serial or args.right_wrist_serial:
+            if args.left_wrist_serial:
+                serial_map["left_wrist"] = args.left_wrist_serial
+            if args.right_wrist_serial:
+                serial_map["right_wrist"] = args.right_wrist_serial
+        else:
+            serials = _rs_pick_wrist_serials(_rs_probe)
+            if not serials:
+                print("[3cam] FATAL: librealsense가 보는 D405가 0대. "
+                      "--list-devices 로 확인하거나 --wrist-backend v4l2 사용.",
+                      flush=True)
+                sys.exit(1)
+            for m, sr in zip(("left_wrist", "right_wrist"), serials[:2]):
+                serial_map[m] = sr
+            print(f"[3cam] 손목 자동배정(시리얼 정렬순): {serial_map}", flush=True)
+            print("[3cam] ★ 좌우가 바뀌면 --left-wrist-serial/--right-wrist-serial "
+                  "로 고정할 것 — librealsense 시리얼과 by-id USB 시리얼은 서로 "
+                  "다른 값이라 이름만으로는 좌우를 알 수 없다(영상 보고 판단).",
+                  flush=True)
+            if len(serials) == 1:
+                print("[3cam] 주의: D405 1대만 → left_wrist 로만 forward.",
+                      flush=True)
+
+        ready_events = {}
+        for mount, wserial in serial_map.items():
+            raw_latest = LatestFrame()
+            jpeg_latest = LatestFrame()
+            ready = threading.Event()
+            wrist_latests[mount] = jpeg_latest
+            ready_events[mount] = ready
+            tg = threading.Thread(
+                target=realsense_grabber,
+                args=(wserial, mount, raw_latest, args.wrist_width,
+                      args.wrist_height, args.wrist_fps, stop_event, ready),
+                daemon=True,
+            )
+            te = threading.Thread(
+                target=wrist_encoder,
+                args=(mount, raw_latest, jpeg_latest, args.jpeg_quality, stop_event,
+                      content_hz),
+                daemon=True,
+            )
+            tg.start()
+            te.start()
+            wrist_threads.append(tg)
+            wrist_threads.append(te)
+
+        deadline = time.time() + args.wrist_ready_timeout
+        for mount, ready in ready_events.items():
+            if not ready.wait(timeout=max(0.0, deadline - time.time())):
+                print(f"[3cam] FATAL: {mount}(realsense) 첫 프레임 대기 타임아웃",
+                      flush=True)
+                stop_event.set()
+                _release_all_devices()
+                sys.exit(1)
+        if stop_event.is_set():
+            print("[3cam] FATAL: 손목(realsense) 초기화 실패", flush=True)
+            sys.exit(1)
+        print("[3cam] 손목 카메라 준비 완료 (realsense)", flush=True)
+
+    elif not args.no_wrists:
         # mount -> spec(원본: by-id 링크/노드경로/serial). reader가 매 open 때
         # 재해석하므로 재열거에 견딘다. 여기선 시작 시 유효성만 검증한다.
         spec_map = {}

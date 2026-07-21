@@ -119,6 +119,30 @@ if [[ "${HEAD_BACKEND:-realsense}" == "realsense" ]]; then
 else
     echo "[ltw-camera-server] HEAD_BACKEND=videohub → VideoClient RPC 폴백 (v7과 동일 동작)"
 fi
+# 손목 백엔드 선택. WRIST_BACKEND=realsense 이면 손목 D405 도 librealsense(RSUSB)
+# 직결로 읽는다. 기본은 v4l2(기존 known-good).
+#   목적: (1) 커널 uvcvideo 를 우회해 D405 wedge 에서 벗어날 여지
+#         (2) hardware_reset() 이라는 진짜 복구 수단 확보 — USBDEVFS_RESET 은
+#             2026-07-21 실측에서 wedge 복구에 실패했고, 유효한 sysfs authorized
+#             토글은 컨테이너에서 /sys 가 ro 라 쓸 수 없다.
+#   ⚠️ Intel 문서: RSUSB 는 multi-cam 에 최적화돼 있지 않다. 머리까지 합쳐 3대를
+#      RSUSB 로 돌리는 것은 미검증 영역이므로 실측으로 확인할 것.
+#   ★ 시리얼 주의: LEFT/RIGHT_WRIST_SERIAL 은 by-id 의 USB 시리얼이 아니라
+#     librealsense 가 보고하는 값이다(--list-devices 로 확인).
+if [[ "${WRIST_BACKEND:-v4l2}" == "realsense" ]]; then
+    FWD_ARGS+=(--wrist-backend realsense --wrist-fps "${WRIST_FPS:-30}")
+    if [[ -n "${LEFT_WRIST_SERIAL:-}" ]]; then
+        FWD_ARGS+=(--left-wrist-serial "$LEFT_WRIST_SERIAL")
+    fi
+    if [[ -n "${RIGHT_WRIST_SERIAL:-}" ]]; then
+        FWD_ARGS+=(--right-wrist-serial "$RIGHT_WRIST_SERIAL")
+    fi
+    echo "[ltw-camera-server] WRIST_BACKEND=realsense → 손목도 librealsense 직결" \
+         "(${WRIST_FPS:-30}fps, serial=${LEFT_WRIST_SERIAL:-auto}/${RIGHT_WRIST_SERIAL:-auto})"
+    echo "[ltw-camera-server]   ⚠️ 3대 전부 RSUSB = 미검증 영역. Hz/wedge 실측 확인할 것"
+else
+    echo "[ltw-camera-server] WRIST_BACKEND=v4l2 (기본, cv2.VideoCapture)"
+fi
 if [[ -n "${HEAD_RESIZE:-}" ]]; then
     FWD_ARGS+=(--head-resize "$HEAD_RESIZE")
     echo "[ltw-camera-server] HEAD_RESIZE=$HEAD_RESIZE → 머리 사전 리사이즈(Orin 디코드+리사이즈+재인코딩)"
