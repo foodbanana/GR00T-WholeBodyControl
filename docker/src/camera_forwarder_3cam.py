@@ -784,25 +784,45 @@ def main():
     wrist_latests = {}  # mount -> LatestFrame
     content_hz = {}     # 진단용: mount -> 실제 콘텐츠 Hz (손목 encoder가 갱신)
 
-    # docker stop(SIGTERM)/Ctrl+C(SIGINT) 시 카메라를 깨끗이 release(STREAMOFF)한다.
+    # docker stop(SIGTERM)/Ctrl+C(SIGINT) 시 카메라를 깨끗이 release 한다.
+    #
+    # ★ 재진입 방지가 필수다 (2026-07-21 실측으로 확인)
+    #   파이썬 시그널 핸들러는 **메인 스레드에서** 실행된다. 핸들러가 락을 잡고
+    #   있는 동안 다음 SIGINT 가 들어오면 같은 스레드에서 핸들러가 **중첩 실행**
+    #   되고, threading.Lock 은 재진입 불가라 자기 자신이 이미 잡은 락에 영원히
+    #   막힌다. 바깥 프레임은 재개될 수 없으므로 메인 스레드가 통째로 굳는다.
+    #   증상: ^C 를 누를수록 "signal 2 → ..." 만 반복 출력되고 안 죽는다.
+    #   -> 핸들러 진입 즉시 이후 시그널을 "무조건 즉시 종료"로 바꿔 중첩을 막는다.
+    _shutting_down = {"v": False}
+
+    def _force_exit(signum, _frame):
+        os._exit(130)
+
     def _shutdown(signum, _frame):
+        if _shutting_down["v"]:
+            os._exit(130)
+        _shutting_down["v"] = True
+        # 이 시점 이후의 SIGINT/SIGTERM 은 락을 건드리지 않고 즉시 죽인다.
+        signal.signal(signal.SIGINT, _force_exit)
+        signal.signal(signal.SIGTERM, _force_exit)
+
         # ★ librealsense pipeline 은 **여기서 stop() 하지 않는다.**
         #   grabber 스레드가 wait_for_frames 안에 블록돼 있을 때 다른 스레드에서
-        #   같은 pipeline 에 stop() 을 걸면 교착된다(2026-07-21 실측: Ctrl+C 시
-        #   V4L2는 정리되는데 "librealsense stopped" 가 안 찍히고 프로세스가 안
-        #   죽었다). 대신 stop_event 만 세우고, pipeline.stop() 은 **그 pipeline 을
-        #   소유한 grabber 스레드가 자기 finally 에서** 하게 둔다.
+        #   같은 pipeline 에 stop() 을 걸면 교착된다. 대신 stop_event 만 세우고,
+        #   pipeline.stop() 은 그 pipeline 을 소유한 grabber 스레드가 자기
+        #   finally 에서 하게 둔다.
         print(f"[3cam] signal {signum} → 카메라 release 후 종료", flush=True)
         stop_event.set()
-        _release_all_caps()         # V4L2 STREAMOFF (이건 다른 스레드에서 안전)
+        _release_all_caps()         # V4L2 STREAMOFF (다른 스레드에서 안전)
 
-        # grabber 가 스스로 정리할 시간을 준다. wait_for_frames 타임아웃이 1초이므로
+        # grabber 가 스스로 정리할 시간을 준다. wait_for_frames 타임아웃이 1초라
         # 최대 그만큼 걸린다. 정리되면 _ACTIVE_PIPELINES 가 비워진다.
+        # ※ 여기서 _RS_LOCK 을 **잡지 않는다** — 위 재진입 문제의 원인이었고,
+        #   dict 가 비었는지 읽는 것뿐이라 락 없이도 안전하다.
         deadline = time.time() + 3.0
         while time.time() < deadline:
-            with _RS_LOCK:
-                if not _ACTIVE_PIPELINES:
-                    break
+            if not _ACTIVE_PIPELINES:
+                break
             time.sleep(0.05)
         else:
             print("[3cam] 경고: librealsense pipeline 정리 대기 timeout "
@@ -810,8 +830,8 @@ def main():
                   flush=True)
 
         # os._exit: 인터프리터 종료 절차를 건너뛰고 즉시 죽는다. sys.exit()는
-        # SystemExit 예외라서, 데몬 스레드가 C 확장 안에 갇혀 있으면 finalize 단계에서
-        # 다시 멈출 수 있다. 정리는 위에서 이미 끝냈으므로 여기서는 확실히 죽는 게 낫다.
+        # SystemExit 예외라서, 데몬 스레드가 C 확장 안에 갇혀 있으면 finalize
+        # 단계에서 다시 멈출 수 있다. 정리는 위에서 끝냈으므로 확실히 죽는 게 낫다.
         sys.stdout.flush()
         sys.stderr.flush()
         os._exit(0)
