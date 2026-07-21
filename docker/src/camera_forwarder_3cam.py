@@ -815,23 +815,25 @@ def main():
         stop_event.set()
         _release_all_caps()         # V4L2 STREAMOFF (다른 스레드에서 안전)
 
-        # grabber 가 스스로 정리할 시간을 준다. wait_for_frames 타임아웃이 1초라
-        # 최대 그만큼 걸린다. 정리되면 _ACTIVE_PIPELINES 가 비워진다.
-        # ※ 여기서 _RS_LOCK 을 **잡지 않는다** — 위 재진입 문제의 원인이었고,
-        #   dict 가 비었는지 읽는 것뿐이라 락 없이도 안전하다.
-        deadline = time.time() + 3.0
-        while time.time() < deadline:
-            if not _ACTIVE_PIPELINES:
-                break
-            time.sleep(0.05)
-        else:
-            print("[3cam] 경고: librealsense pipeline 정리 대기 timeout "
-                  "(그대로 종료 — 프로세스 종료 시 libusb 가 인터페이스를 놓는다)",
-                  flush=True)
+        # ★ librealsense pipeline 정리를 **기다리지 않는다** (2026-07-21 결론)
+        #   처음엔 grabber 가 pipeline.stop() 을 끝낼 때까지 3초 기다렸는데,
+        #   pipeline.stop() 이 그보다 오래 걸려서 사용자 체감으로는 "^C 를 눌러도
+        #   안 죽는다"가 됐다. 그리고 그 대기는 **불필요하다**:
+        #     `docker rm -f` 로 컨테이너를 강제 종료(SIGKILL)한 뒤에도 다음 실행이
+        #     정상적으로 `librealsense started` 했다. RSUSB 는 프로세스가 죽으면
+        #     libusb 가 인터페이스를 놓고 커널이 재바인딩하기 때문이다.
+        #   V4L2 에서 겪은 "고아 스트림" 문제(그래서 _ACTIVE_CAPS 가 있다)를
+        #   RSUSB 에 그대로 옮긴 것이 과했다. V4L2 정리만 확실히 하고 즉시 죽는다.
+        #
+        #   짧게(0.3초)만 기다리는 이유: 그 사이에 grabber 가 끝나면 깨끗한 stop 이
+        #   덤으로 얻어진다. 안 끝나도 손해가 없으므로 기다림을 늘리지 않는다.
+        deadline = time.time() + 0.3
+        while time.time() < deadline and _ACTIVE_PIPELINES:
+            time.sleep(0.02)
 
         # os._exit: 인터프리터 종료 절차를 건너뛰고 즉시 죽는다. sys.exit()는
         # SystemExit 예외라서, 데몬 스레드가 C 확장 안에 갇혀 있으면 finalize
-        # 단계에서 다시 멈출 수 있다. 정리는 위에서 끝냈으므로 확실히 죽는 게 낫다.
+        # 단계에서 다시 멈출 수 있다.
         sys.stdout.flush()
         sys.stderr.flush()
         os._exit(0)
