@@ -316,12 +316,31 @@ RUN git clone --depth 1 --branch ${LIBREALSENSE_VERSION} \
 # BUILD_WITH_CUDA=false    : l4t-jetpack에 CUDA가 있지만 켜면 빌드가 크게
 #                            길어진다. 색변환은 어차피 OpenCV에서 하므로 이득 없음.
 # BUILD_EXAMPLES/GRAPHICAL : 불필요(헤드리스 컨테이너)
+#
+# ★ Python 변수를 3종류 다 넘기는 이유 (2026-07-21 빌드 실패로 확인)
+#   CMake에는 Python을 찾는 모듈이 세 개 있고 **각자 다른 변수 이름**을 본다:
+#     FindPythonInterp/FindPythonLibs (구식) -> PYTHON_EXECUTABLE
+#     FindPython3                            -> Python3_EXECUTABLE
+#     FindPython  (버전 무관)                -> Python_EXECUTABLE
+#   librealsense의 CMake/external_pybind11.cmake 는 마지막 FindPython 을 쓰는데,
+#   이건 버전을 안 가려서 이미지에 있는 **python2.7 을 먼저 집는다.** 그리고
+#   python2.7-dev 가 없으니 이렇게 죽었다:
+#     Could NOT find Python (missing: Python_INCLUDE_DIRS Development)
+#                           (found version "2.7.18")
+#   PYTHON_EXECUTABLE 만 넘겨서는 FindPython 이 그걸 아예 안 보므로 소용없다
+#   (실패 로그에도 "Found PythonInterp: 3.8.10" 직후에 FindPython 이 2.7.18을
+#    잡는 장면이 그대로 남아 있었다). 세 이름을 모두 명시해서 어느 모듈이
+#   호출되든 python3.8을 가리키게 한다.
 WORKDIR /opt/librealsense/build
 RUN cmake .. \
         -DCMAKE_BUILD_TYPE=Release \
         -DFORCE_RSUSB_BACKEND=true \
         -DBUILD_PYTHON_BINDINGS=true \
         -DPYTHON_EXECUTABLE=/usr/bin/python3 \
+        -DPython_EXECUTABLE=/usr/bin/python3 \
+        -DPython3_EXECUTABLE=/usr/bin/python3 \
+        -DPython_ROOT_DIR=/usr \
+        -DPython3_ROOT_DIR=/usr \
         -DBUILD_EXAMPLES=false \
         -DBUILD_GRAPHICAL_EXAMPLES=false \
         -DBUILD_WITH_CUDA=false \
