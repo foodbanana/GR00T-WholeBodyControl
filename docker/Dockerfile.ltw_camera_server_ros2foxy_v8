@@ -382,6 +382,23 @@ RUN make install && ldconfig
 #     경로를 박지 않고 **find 로 찾아서** 배치한다. 빌드 트리도 함께 뒤진다
 #     — install 규칙이 빠뜨렸을 경우 거기에는 있을 수 있기 때문이다.
 #
+# (3) 파일명이 `.so` 로 **끝나야** 한다 — 이것 때문에 한 번 더 실패했다
+#     librealsense 는 버전 접미사가 붙은 실체 파일과 심볼릭 링크를 함께 만든다:
+#         pyrealsense2.cpython-38-aarch64-linux-gnu.so         -> ...so.2.55
+#         pyrealsense2.cpython-38-aarch64-linux-gnu.so.2.55    -> ...so.2.55.1
+#         pyrealsense2.cpython-38-aarch64-linux-gnu.so.2.55.1  (실체, 1.9MB)
+#     `find -type f` 로 찾으면 심볼릭 링크가 걸러져 **실체 파일**만 잡히는데,
+#     그 이름은 `.so.2.55.1` 로 끝난다. 파이썬 확장모듈 로더는 `.so` 로 끝나는
+#     파일만 모듈로 인식하므로, 복사해봐야 import 대상이 아니다(그래서 또
+#     빈 namespace 디렉터리가 잡혔다). 복사할 때 버전 접미사를 떼어낸다.
+#
+# ★ 참고: 이 이미지에서 `make install` 은 본체 모듈을 설치하지 않는다.
+#   pyrsutils 와 cmake 파일만 /usr/lib/python3/dist-packages/pyrealsense2/ 에
+#   깔고 본체는 빌드 트리(build/Release/)에만 남긴다 — librealsense 2.55 의
+#   install 규칙 문제로 보인다. 그래서 아래에서 빌드 트리를 직접 뒤진다.
+#   (2026-07-21 실측: 본체는 정상 빌드됨 = 1.88MB, cmake 도 python3.8 을
+#    Interpreter/Development 모두 제대로 찾음 -> 순수 install 누락)
+#
 # 배치 전략: 본체 .so 를 PYTHONPATH 최상위 디렉터리에 **모듈 파일 그대로**
 #   둔다(패키지 디렉터리 안에 넣지 않는다). 패키지 디렉터리 안에 넣으면 위
 #   (1)의 namespace package 가 먼저 잡혀서 또 가려지기 때문이다. PYTHONPATH가
@@ -405,10 +422,17 @@ RUN set -x \
            echo "!!! 않았다는 뜻 -> make pyrealsense2 를 명시 호출해야 한다."; \
            exit 1; \
        fi \
-    && cp -v "$RS_SO" /usr/local/lib/python3.8/dist-packages/ \
-    && (find /usr/local/lib /usr/lib /opt/librealsense/build -name 'pyrsutils*.so*' \
-             -type f 2>/dev/null | head -1 | xargs -r -I{} cp -v {} \
-             /usr/local/lib/python3.8/dist-packages/ || true) \
+    && RS_NAME="$(basename "$RS_SO" | sed 's/\.so\..*$/.so/')" \
+    && echo "설치 파일명: $RS_NAME  (버전 접미사 제거)" \
+    && cp -v "$RS_SO" "/usr/local/lib/python3.8/dist-packages/$RS_NAME" \
+    && (RSU_SO="$(find /usr/local/lib /usr/lib /opt/librealsense/build \
+                       -name 'pyrsutils*.so*' -type f 2>/dev/null | head -1)"; \
+        if [ -n "$RSU_SO" ]; then \
+            RSU_NAME="$(basename "$RSU_SO" | sed 's/\.so\..*$/.so/')"; \
+            cp -v "$RSU_SO" "/usr/local/lib/python3.8/dist-packages/$RSU_NAME"; \
+        fi) \
+    && echo "=== [v8] dist-packages 최종 내용 ===" \
+    && ls -la /usr/local/lib/python3.8/dist-packages/ \
     && echo "=== [v8] import 검증 (namespace package 가 아닌 진짜 모듈인지) ===" \
     && python3 -c "\
 import pyrealsense2 as rs; \
