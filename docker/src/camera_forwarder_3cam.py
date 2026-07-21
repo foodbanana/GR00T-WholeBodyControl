@@ -27,7 +27,7 @@ ltw-camera-server v6 (0.9-foxy-3cam) 용 3-카메라 forwarder — V4L2 손목 �
         wedge 시 rs.device.hardware_reset()이라는 복구 수단이 생긴다.
         이 경로는 CycloneDDS/VideoClient를 아예 초기화하지 않는다.
 
-        ★★ videohub과 공존하지 않는다 — 2026-07-21 실측으로 확정 ★★
+        ★★ pip wheel 로는 안 된다 — 2026-07-21 실측으로 확정 ★★
           당초 "pip pyrealsense2 wheel은 RSUSB(libuvc/libusb) 백엔드라 커널
           uvcvideo를 우회하므로 videohub이 STREAMON 독점(EBUSY)해도 공존한다"
           고 적었으나, **틀렸다.** probe_realsense_head.py 실행 결과:
@@ -52,14 +52,30 @@ ltw-camera-server v6 (0.9-foxy-3cam) 용 3-카메라 forwarder — V4L2 손목 �
             **이 forwarder를 --head-backend realsense 로 쓰려면 v8 이미지가
             필요하다.** v7 이미지(pip wheel)로는 0프레임이다.
 
-        ★ videohub 정지 전제 (2026-07-21 팀 승인):
-          2026-07-21 팀 승인 사항:
-              수집 시작 전 -> videohub stop
-              수집 중      -> pyrealsense2가 D435i 독점
-              수집 종료 전 -> videohub 원복(재시작)
-              G1 전원 재투입 -> 다른 사용자에겐 원상태
-        ★ RSUSB 백엔드는 uvcvideo를 우회하므로 videohub과 공존할 여지가
-          있으나 미검증이다. 확인되면 위 정지 절차가 불필요해진다.
+        ★★ v8 실측 결과 (2026-07-21) — 목표 달성 ★★
+          content(new frames): ego_view=29.2Hz  left_wrist=30.0Hz  right_wrist=30.0Hz
+          publish fps 29.2, head errors 0, 머리 JPEG 13.3KB/frame.
+          videohub RPC 경로(~15Hz) 대비 약 2배이고, 1080p 디코드->리사이즈->
+          재인코딩이 사라져 Orin CPU도 크게 줄었다.
+
+        ★ videohub 과의 관계 — "공존"이 아니라 "밀어내기"다
+          RSUSB 가 USB 인터페이스를 claim 하면 커널 uvcvideo 가 detach 되고,
+          videohub_pc4 의 V4L2 스트림이 끊겨 프로세스가 사라진다. 그리고
+          **자동으로 되살아나지 않는다**(master_service 가 재시작을 포기함).
+          이유: 이 과정에서 D435i 가 여러 번 재열거되어 /dev/videoN 번호가
+          밀리는데, master_service 는 videohub 을 `/dev/video4` 로 하드코딩해
+          띄우기 때문이다. 실제로 실행 후 /dev/video4 는 **손목 D405** 를
+          가리키게 됐다 — 이 상태에서 videohub 을 수동 기동하면 머리가 아니라
+          손목을 점유하므로 **절대 하지 말 것.**
+          => videohub 복구는 **재부팅**이 유일하고 확실한 방법이다.
+             (2026-07-21 팀 승인 라이프사이클의 "G1 전원 재투입 -> 원상태"에
+              해당한다.)
+
+        ★ 손목 노드도 같은 이유로 밀린다 — 그러나 문제되지 않는다.
+          실측에서 머리 시작 직후 손목이 REQBUFS errno=19 로 실패했지만,
+          by-id 재해석 로직이 새 노드를 찾아 자동 복구했다
+          (video15->video16, video10->video11). 그 뒤 계속 30.0Hz.
+          **손목은 반드시 by-id 경로로 지정할 것**(/dev/videoN 직접 지정 금지).
 
 아키텍처 (단일 프로세스, 스레드 병합)
 --------------------------------------
@@ -544,7 +560,10 @@ def realsense_grabber(
             try:
                 # 위치인자로 넘긴다 — pybind11 바인딩의 키워드 인자명(timeout_ms)이
                 # 버전에 따라 다를 수 있어 TypeError로 죽는 것을 피한다.
-                frames = pipeline.wait_for_frames(5000)
+                # 타임아웃을 1초로 둔 이유: 이 호출이 블록되는 동안에는 stop_event를
+                # 못 보므로, 길면 종료가 그만큼 늦어진다. 30fps 스트림에서 1초는
+                # 이미 충분히 관대한 값이다(정상이면 33ms에 돌아온다).
+                frames = pipeline.wait_for_frames(1000)
                 color = frames.get_color_frame()
                 if not color:
                     consec_fail += 1
@@ -767,10 +786,35 @@ def main():
 
     # docker stop(SIGTERM)/Ctrl+C(SIGINT) 시 카메라를 깨끗이 release(STREAMOFF)한다.
     def _shutdown(signum, _frame):
+        # ★ librealsense pipeline 은 **여기서 stop() 하지 않는다.**
+        #   grabber 스레드가 wait_for_frames 안에 블록돼 있을 때 다른 스레드에서
+        #   같은 pipeline 에 stop() 을 걸면 교착된다(2026-07-21 실측: Ctrl+C 시
+        #   V4L2는 정리되는데 "librealsense stopped" 가 안 찍히고 프로세스가 안
+        #   죽었다). 대신 stop_event 만 세우고, pipeline.stop() 은 **그 pipeline 을
+        #   소유한 grabber 스레드가 자기 finally 에서** 하게 둔다.
         print(f"[3cam] signal {signum} → 카메라 release 후 종료", flush=True)
         stop_event.set()
-        _release_all_devices()      # V4L2 STREAMOFF + rs pipeline stop
-        sys.exit(0)
+        _release_all_caps()         # V4L2 STREAMOFF (이건 다른 스레드에서 안전)
+
+        # grabber 가 스스로 정리할 시간을 준다. wait_for_frames 타임아웃이 1초이므로
+        # 최대 그만큼 걸린다. 정리되면 _ACTIVE_PIPELINES 가 비워진다.
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            with _RS_LOCK:
+                if not _ACTIVE_PIPELINES:
+                    break
+            time.sleep(0.05)
+        else:
+            print("[3cam] 경고: librealsense pipeline 정리 대기 timeout "
+                  "(그대로 종료 — 프로세스 종료 시 libusb 가 인터페이스를 놓는다)",
+                  flush=True)
+
+        # os._exit: 인터프리터 종료 절차를 건너뛰고 즉시 죽는다. sys.exit()는
+        # SystemExit 예외라서, 데몬 스레드가 C 확장 안에 갇혀 있으면 finalize 단계에서
+        # 다시 멈출 수 있다. 정리는 위에서 이미 끝냈으므로 여기서는 확실히 죽는 게 낫다.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
