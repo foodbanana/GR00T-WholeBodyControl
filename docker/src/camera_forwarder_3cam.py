@@ -14,10 +14,27 @@ ltw-camera-server v6 (0.9-foxy-3cam) 용 3-카메라 forwarder — V4L2 손목 �
     cv2.VideoCapture(node, CAP_V4L2)로 color 노드를 직접 읽는다. OpenCV가
     UYVY/YUYV를 BGR로 자동 변환해 (H,W,3)로 준다.
 
+[머리 백엔드 2종 — --head-backend]
+    videohub  (기본, 기존 known-good):
+        unitree_sdk2py VideoClient.GetImageSample() RPC로 호스트 videohub_pc4가
+        중계하는 D435i JPEG를 받는다. 1080p로만 오므로 --head-resize로 Orin에서
+        디코드→리사이즈→재인코딩해야 하고, 실제 새 프레임은 ~15Hz다(RPC는 새
+        프레임이 없으면 직전 바이트를 재반환한다).
+    realsense (신규):
+        librealsense(pyrealsense2)로 D435i를 직접 연다. RSUSB/libuvc 백엔드는
+        커널 uvcvideo를 거치지 않고 libusb로 USB 인터페이스를 claim 하므로,
+        videohub이 /dev/videoN을 STREAMON 독점(EBUSY)하고 있어도 공존한다
+        — videohub을 정지시킬 필요가 없다(공유 로봇 zero-impact 유지).
+        640x480@30을 bgr8로 **직접 요청**하므로 1080p 디코드·리사이즈·재인코딩이
+        통째로 사라진다(--head-resize 불필요). 손목과 완전히 같은 파이프라인이
+        되고, wedge 시 rs.device.hardware_reset()이라는 복구 수단이 생긴다.
+        이 경로는 CycloneDDS/VideoClient를 아예 초기화하지 않는다.
+
 아키텍처 (단일 프로세스, 스레드 병합)
 --------------------------------------
-    [Head 스레드 = 퍼블리시 클럭]
-        unitree_sdk2py VideoClient.GetImageSample() RPC (블로킹, ~36fps)
+    [발행 클럭 = 머리 새 프레임 도착]
+        videohub  : GetImageSample() RPC 블로킹 반환이 곧 클럭
+        realsense : rs grabber -> encoder -> head_jpeg 슬롯의 ts 변화가 클럭
         새 JPEG 프레임 도착 = "지금 저장할 순간"
           -> 손목 최신 스냅샷을 얹어 한 페이로드로 ZMQ send
     [Left/Right wrist 스레드 = 최신값 유지]
@@ -364,6 +381,157 @@ def v4l2_grabber(
         print(f"[3cam][{mount}] V4L2 stopped", flush=True)
 
 
+# =============================================================================
+# librealsense (RSUSB) reader 스레드 — 머리 D435i 직결
+# =============================================================================
+def _rs_pick_head_serial(rs, want_serial: str):
+    """연결된 RealSense 중 머리로 쓸 장치의 시리얼을 고른다.
+
+    want_serial이 주어지면 그것이 실재하는지 확인만 하고 그대로 쓴다.
+    미지정 시 D405가 **아닌** 첫 장치를 고른다 — D405 2대는 손목이고 V4L2로
+    이미 열려 있으므로 librealsense가 절대 건드리면 안 된다."""
+    ctx = rs.context()
+    found = []
+    for dev in ctx.query_devices():
+        try:
+            name = dev.get_info(rs.camera_info.name)
+            serial = dev.get_info(rs.camera_info.serial_number)
+        except Exception:
+            continue
+        found.append((name, serial))
+    print(f"[3cam][head] librealsense 장치 목록: {found}", flush=True)
+    if want_serial:
+        if any(s == want_serial for _n, s in found):
+            return want_serial
+        print(f"[3cam][head] 경고: 지정 시리얼 {want_serial} 미발견 — 그대로 시도",
+              flush=True)
+        return want_serial
+    for name, serial in found:
+        if "405" not in name:          # D405 = 손목(V4L2 점유 중), 제외
+            return serial
+    return None
+
+
+def realsense_grabber(
+    serial: str,
+    mount: str,
+    raw_latest: LatestFrame,
+    width: int,
+    height: int,
+    fps: int,
+    stop_event: threading.Event,
+    ready_event: threading.Event,
+) -> None:
+    """머리 D435i를 librealsense로 직접 읽는 캡처 전용 스레드.
+
+    videohub이 커널 V4L2 노드를 STREAMON 독점(EBUSY)하고 있어도, RSUSB 백엔드는
+    libusb로 USB 인터페이스를 직접 claim 하므로 공존한다. 따라서 이 스레드는
+    호스트 서비스를 정지시키지 않는다.
+
+    v4l2_grabber와 동일하게 "캡처만" 하고 인코딩은 encoder 스레드에 넘긴다.
+    wait_for_frames가 다음 프레임까지 블록하므로 카메라 속도로 페이싱된다.
+    스트림이 죽으면 pipeline 재시작 → 그래도 안 되면 hardware_reset()으로
+    에스컬레이션한다(D405 wedge에 물리 replug밖에 없던 것과 달리, 여기엔
+    펌웨어 리셋 경로가 있다)."""
+    import pyrealsense2 as rs
+
+    pipeline = None
+    did_reset = False
+    consec_fail = 0
+    try:
+        while not stop_event.is_set():
+            # ---- (재)시작 ---------------------------------------------------
+            if pipeline is None:
+                try:
+                    if serial is None:
+                        serial = _rs_pick_head_serial(rs, None)
+                        if serial is None:
+                            raise RuntimeError("머리로 쓸 RealSense 장치를 못 찾음")
+                    cfg = rs.config()
+                    cfg.enable_device(serial)
+                    # bgr8을 직접 요청한다 — librealsense가 D435i의 native YUYV를
+                    # 변환해 주므로 우리가 cvtColor를 할 필요가 없고, exporter가
+                    # 기대하는 BGR과도 그대로 맞는다.
+                    cfg.enable_stream(rs.stream.color, width, height,
+                                      rs.format.bgr8, fps)
+                    pipeline = rs.pipeline()
+                    pipeline.start(cfg)
+                    print(f"[3cam][{mount}] librealsense started "
+                          f"serial={serial} {width}x{height}@{fps} bgr8", flush=True)
+                    consec_fail = 0
+                except Exception as e:
+                    pipeline = None
+                    print(f"[3cam][{mount}] librealsense start 실패: "
+                          f"{type(e).__name__}: {e}", flush=True)
+                    # 첫 시작부터 계속 실패하면 한 번은 펌웨어 리셋을 걸어본다.
+                    consec_fail += 1
+                    if consec_fail >= 3 and not did_reset:
+                        did_reset = _rs_hardware_reset(rs, serial, mount)
+                        if did_reset:
+                            time.sleep(5.0)   # 재열거 대기
+                            continue
+                    time.sleep(2.0)
+                    continue
+
+            # ---- 프레임 취득 -------------------------------------------------
+            try:
+                frames = pipeline.wait_for_frames(timeout_ms=5000)
+                color = frames.get_color_frame()
+                if not color:
+                    consec_fail += 1
+                    continue
+                # get_data()는 pipeline 소유 버퍼를 가리키므로 반드시 복사한다.
+                # (복사 안 하면 다음 프레임이 같은 메모리를 덮어써서 encoder가
+                #  찢어진 프레임을 인코딩한다.)
+                frame = np.array(np.asanyarray(color.get_data()), copy=True)
+            except Exception as e:
+                consec_fail += 1
+                if consec_fail <= 3 or consec_fail % 20 == 0:
+                    print(f"[3cam][{mount}] wait_for_frames 실패({consec_fail}): "
+                          f"{type(e).__name__}: {e}", flush=True)
+                # 연속 실패 = 스트림 wedge. 재시작 → 그래도 안 되면 HW 리셋.
+                if consec_fail >= 10:
+                    try:
+                        pipeline.stop()
+                    except Exception:
+                        pass
+                    pipeline = None
+                    if consec_fail >= 30 and not did_reset:
+                        did_reset = _rs_hardware_reset(rs, serial, mount)
+                        if did_reset:
+                            time.sleep(5.0)
+                    consec_fail = 0
+                continue
+
+            consec_fail = 0
+            did_reset = False   # 정상 프레임이 왔으면 리셋 예산을 되돌린다
+            raw_latest.set(frame, time.time())
+            if not ready_event.is_set():
+                ready_event.set()
+    finally:
+        if pipeline is not None:
+            try:
+                pipeline.stop()
+            except Exception:
+                pass
+        print(f"[3cam][{mount}] librealsense stopped", flush=True)
+
+
+def _rs_hardware_reset(rs, serial: str, mount: str) -> bool:
+    """해당 시리얼의 RealSense에 펌웨어 리셋을 건다(USB 재열거 유발)."""
+    try:
+        for dev in rs.context().query_devices():
+            if dev.get_info(rs.camera_info.serial_number) == serial:
+                dev.hardware_reset()
+                print(f"[3cam][{mount}] hardware_reset() 발행 (serial={serial})",
+                      flush=True)
+                return True
+    except Exception as e:
+        print(f"[3cam][{mount}] hardware_reset 실패: {type(e).__name__}: {e}",
+              flush=True)
+    return False
+
+
 def wrist_encoder(
     mount: str,
     raw_latest: LatestFrame,
@@ -429,6 +597,21 @@ def main():
                              "RPC JPEG를 디코드→리사이즈→재인코딩 → DGX 디코드/리사이즈 부담↓ + "
                              "대역폭↓. Orin CPU 여유 있을 때 사용(3-cam 30fps 목적). exporter는 "
                              "이때 --camera-decode-reduce 1 로(이미 640x480이라 reduce 불필요).")
+    parser.add_argument("--head-backend", default="videohub",
+                        choices=["videohub", "realsense"],
+                        help="머리 영상 취득 경로. videohub=VideoClient RPC(기본, "
+                             "기존 known-good). realsense=librealsense로 D435i 직결 "
+                             "— videohub을 정지시키지 않고 공존하며, 원하는 해상도를 "
+                             "직접 요청하므로 1080p 디코드/리사이즈/재인코딩이 사라진다.")
+    parser.add_argument("--head-serial", default=None,
+                        help="realsense 백엔드에서 쓸 D435i 시리얼(예: 253843061423). "
+                             "미지정 시 D405가 아닌 첫 장치를 자동 선택.")
+    parser.add_argument("--head-width", type=int, default=640,
+                        help="realsense 백엔드의 머리 color 요청 폭")
+    parser.add_argument("--head-height", type=int, default=480,
+                        help="realsense 백엔드의 머리 color 요청 높이")
+    parser.add_argument("--head-fps", type=int, default=30,
+                        help="realsense 백엔드의 머리 color 요청 fps")
     parser.add_argument("--timeout", type=float, default=3.0)
     parser.add_argument("--fps-log-interval", type=float, default=5.0)
 
@@ -460,10 +643,29 @@ def main():
                   f"\n           현재 노드     -> {os.path.realpath(link)}", flush=True)
         print("\n[3cam] 위 by-id 경로를 --left-node / --right-node 로 지정하세요"
               "(재열거에도 안정적).", flush=True)
+        # librealsense가 보는 장치도 함께 출력한다 — --head-serial 값을 여기서
+        # 그대로 복사하면 된다. videohub이 떠 있어도 열거는 된다.
+        try:
+            import pyrealsense2 as rs
+            print("\n[3cam] librealsense 장치(머리 --head-serial 용):", flush=True)
+            for dev in rs.context().query_devices():
+                print(f"[3cam]   {dev.get_info(rs.camera_info.name)}  "
+                      f"serial={dev.get_info(rs.camera_info.serial_number)}",
+                      flush=True)
+        except Exception as e:
+            print(f"[3cam] librealsense 열거 실패: {type(e).__name__}: {e}", flush=True)
         sys.exit(0)
 
     # ---- 머리 사전 리사이즈 파싱 (예: "640x480") ----------------------------
+    use_rs_head = (args.head_backend == "realsense")
     head_resize = None
+    if use_rs_head and args.head_resize:
+        # realsense는 원하는 해상도를 센서에 직접 요청하므로 사후 리사이즈는
+        # 순수 낭비다(디코드→리사이즈→재인코딩 사이클이 다시 생긴다).
+        print(f"[3cam] --head-resize는 realsense 백엔드에서 무시된다 "
+              f"(--head-width/--head-height {args.head_width}x{args.head_height}로 "
+              f"직접 요청).", flush=True)
+        args.head_resize = None
     if args.head_resize:
         _hw, _hh = args.head_resize.lower().split("x")
         head_resize = (int(_hw), int(_hh))
@@ -567,20 +769,52 @@ def main():
             sys.exit(1)
         print("[3cam] 손목 카메라 준비 완료", flush=True)
 
-    # ---- 머리 VideoClient ---------------------------------------------------
-    print(f"[3cam] CycloneDDS init on {args.interface} (domain 0)", flush=True)
-    ChannelFactoryInitialize(0, args.interface)
-    print(f"[3cam] VideoClient init (timeout={args.timeout}s)", flush=True)
-    client = VideoClient()
-    client.SetTimeout(args.timeout)
-    client.Init()
-    print("[3cam] VideoClient ready, forwarding 3-cam payload...", flush=True)
+    # ---- 머리 백엔드 기동 ---------------------------------------------------
+    client = None
+    head_jpeg_latest = None
+    if use_rs_head:
+        # librealsense 직결. CycloneDDS/VideoClient를 아예 초기화하지 않는다
+        # — 머리가 DDS에 의존하지 않게 되는 것이 이 경로의 부수 이득이다.
+        head_raw = LatestFrame()
+        head_jpeg_latest = LatestFrame()
+        head_ready = threading.Event()
+        tg = threading.Thread(
+            target=realsense_grabber,
+            args=(args.head_serial, args.head_mount, head_raw,
+                  args.head_width, args.head_height, args.head_fps,
+                  stop_event, head_ready),
+            daemon=True,
+        )
+        te = threading.Thread(
+            target=wrist_encoder,
+            args=(args.head_mount, head_raw, head_jpeg_latest, args.jpeg_quality,
+                  stop_event, content_hz),
+            daemon=True,
+        )
+        tg.start()
+        te.start()
+        print("[3cam] 머리 백엔드=realsense (librealsense 직결, videohub 정지 불필요). "
+              "첫 프레임 대기...", flush=True)
+        if not head_ready.wait(timeout=args.wrist_ready_timeout):
+            print("[3cam] FATAL: 머리(realsense) 첫 프레임 대기 타임아웃", flush=True)
+            stop_event.set()
+            _release_all_caps()
+            sys.exit(1)
+        print("[3cam] 머리 카메라 준비 완료, forwarding 3-cam payload...", flush=True)
+    else:
+        print(f"[3cam] CycloneDDS init on {args.interface} (domain 0)", flush=True)
+        ChannelFactoryInitialize(0, args.interface)
+        print(f"[3cam] VideoClient init (timeout={args.timeout}s)", flush=True)
+        client = VideoClient()
+        client.SetTimeout(args.timeout)
+        client.Init()
+        print("[3cam] VideoClient ready, forwarding 3-cam payload...", flush=True)
 
-    # ChannelFactoryInitialize/VideoClient.Init()이 자체 SIGINT/SIGTERM 핸들러를
-    # 설치해 우리 것을 덮어썼다(그래서 Ctrl+C 시 카메라 release 없이 강제종료됨).
-    # 여기서 다시 설치해 우리 핸들러가 이기게 하여 종료 시 STREAMOFF를 보장한다.
-    signal.signal(signal.SIGTERM, _shutdown)
-    signal.signal(signal.SIGINT, _shutdown)
+        # ChannelFactoryInitialize/VideoClient.Init()이 자체 SIGINT/SIGTERM 핸들러를
+        # 설치해 우리 것을 덮어썼다(그래서 Ctrl+C 시 카메라 release 없이 강제종료됨).
+        # 여기서 다시 설치해 우리 핸들러가 이기게 하여 종료 시 STREAMOFF를 보장한다.
+        signal.signal(signal.SIGTERM, _shutdown)
+        signal.signal(signal.SIGINT, _shutdown)
 
     # ---- 머리 루프 = 퍼블리시 클럭 -----------------------------------------
     frame_count = 0
@@ -591,26 +825,44 @@ def main():
     last_log = time.time()
     stale_thresh = 1.0
 
+    head_last_pub_ts = None
+
     try:
         while True:
-            code, data = client.GetImageSample()
-            if code != 0 or not data:
-                error_count += 1
-                if error_count <= 3 or error_count % 30 == 0:
-                    print(f"[3cam] GetImageSample failed: code={code} "
-                          f"(errors={error_count})", flush=True)
-                time.sleep(0.05)
-                continue
+            if use_rs_head:
+                # 발행 클럭 = 머리 JPEG 슬롯의 ts 변화. encoder가 항상 최신 RAW만
+                # 인코딩하므로 여기서 옛 프레임을 볼 일이 없다.
+                snap = None
+                while not stop_event.is_set():
+                    snap = head_jpeg_latest.get()
+                    if snap is not None and snap[1] != head_last_pub_ts:
+                        break
+                    snap = None
+                    time.sleep(0.002)
+                if snap is None:
+                    break
+                head_bytes, ts = snap
+                head_last_pub_ts = ts
+                # 콘텐츠 Hz는 encoder가 content_hz[head_mount]에 이미 기록한다.
+            else:
+                code, data = client.GetImageSample()
+                if code != 0 or not data:
+                    error_count += 1
+                    if error_count <= 3 or error_count % 30 == 0:
+                        print(f"[3cam] GetImageSample failed: code={code} "
+                              f"(errors={error_count})", flush=True)
+                    time.sleep(0.05)
+                    continue
 
-            ts = time.time()
-            head_bytes = bytes(data)
-            # 진단: RPC가 준 raw 바이트(리사이즈 전 = 진짜 소스 콘텐츠)를 해싱.
-            # GetImageSample은 새 프레임이 없으면 직전 바이트를 재반환하므로,
-            # 바이트가 바뀔 때만 세면 videohub의 실제 콘텐츠 Hz가 나온다.
-            _hh = hash(head_bytes)
-            if _hh != head_last_hash:
-                head_content_count += 1
-                head_last_hash = _hh
+                ts = time.time()
+                head_bytes = bytes(data)
+                # 진단: RPC가 준 raw 바이트(리사이즈 전 = 진짜 소스 콘텐츠)를 해싱.
+                # GetImageSample은 새 프레임이 없으면 직전 바이트를 재반환하므로,
+                # 바이트가 바뀔 때만 세면 videohub의 실제 콘텐츠 Hz가 나온다.
+                _hh = hash(head_bytes)
+                if _hh != head_last_hash:
+                    head_content_count += 1
+                    head_last_hash = _hh
             # 사전 리사이즈: RPC 1080p JPEG를 Orin에서 640x480으로 줄여 재인코딩.
             # DGX는 작은 640x480만 디코드(리사이즈 불필요) → 3-cam 30fps 목적.
             if head_resize is not None:
@@ -653,8 +905,14 @@ def main():
                 # 통합 콘텐츠 Hz 줄: 각 카메라 영상이 '실제로 새로 바뀌는' 속도.
                 # (publish fps와 다름 — publish는 루프 회전마다 나가고, 머리는
                 #  RPC 재탕분이 섞여 콘텐츠 Hz < publish Hz 인 게 정상.)
-                parts = [f"{args.head_mount}={head_content_count / dt:.1f}Hz"]
+                if use_rs_head:
+                    parts = [f"{args.head_mount}="
+                             f"{content_hz.get(args.head_mount, 0.0):.1f}Hz"]
+                else:
+                    parts = [f"{args.head_mount}={head_content_count / dt:.1f}Hz"]
                 for m in sorted(content_hz.keys()):
+                    if m == args.head_mount:
+                        continue          # 머리는 위에서 이미 넣었다
                     parts.append(f"{m}={content_hz[m]:.1f}Hz")
                 print(f"[3cam] content(new frames): {'  '.join(parts)}", flush=True)
                 print(f"[3cam] publish fps: {fps:.1f} | keys={sorted(images.keys())} "
