@@ -11,7 +11,10 @@
                           오염된 에피소드를 걸러내려면 이 검사가 필요하다.
   5) 관절/액션 무결성    : NaN 없음, 길이 일치
   6) LeRobot 실제 로딩   : LeRobotDataset(root=...) → ds[0]에 3카메라+state+action,
-                          비디오가 실제 디코드(검정 아님)되는지
+                          비디오가 실제 디코드(검정 아님)되는지.
+                          단 process_dataset.py 정제본은 meta/episodes_stats.jsonl이 없어
+                          native 로더가 Hub로 폴백(404)하는데, 실제 소비자 Isaac-GR00T는
+                          이 파일이 불필요하므로 native 로딩을 스킵하고 VLA-facing 키만 확인한다.
 
 사용:
   source .venv_data_collection/bin/activate
@@ -211,35 +214,53 @@ def verify(root: Path, do_load: bool, do_freeze: bool) -> bool:
     # --- LeRobot 실제 로딩 ---
     if do_load:
         print("\n[6] LeRobot 실제 로딩 (VLA 소비 가능성)")
-        try:
-            from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
-            ds = LeRobotDataset(repo_id="verify/tmp", root=str(root))
-            it = ds[0]
-            _p(OK, f"LeRobotDataset 로딩 성공: {len(ds)}프레임 {ds.num_episodes}에피소드")
-            needed = [f"observation.images.{c}" for c in ("ego_view", "left_wrist", "right_wrist")]
-            needed += ["observation.state", "action.wbc"]
-            missing = [k for k in needed if k not in it]
-            if missing:
-                _p(NO, f"샘플에 누락 키: {missing}")
+        stats_path = root / "meta" / "episodes_stats.jsonl"
+        if not stats_path.exists():
+            # process_dataset.py로 정제한 데이터셋은 meta/episodes_stats.jsonl을 남기지 않는다.
+            # native LeRobotDataset(v2.1)은 이 파일이 없으면 로컬 로딩에 실패하고 HF Hub로 폴백해
+            # 엉뚱한 404(RepositoryNotFoundError)를 던진다. 하지만 실제 파인튜닝 소비자인
+            # Isaac-GR00T 로더는 이 파일을 요구하지 않는다 — NVIDIA 공식 경로가
+            # collect → process_dataset.py(→ 이 파일 제거) → launch_finetune 이기 때문.
+            # 즉 native 로딩 실패는 '잘못된 로더' 경보이므로 실패로 치지 않고,
+            # VLA가 실제로 쓰는 키(3카메라 비디오 + state + action)의 로컬 존재만 확인한다.
+            _p(WARN, "meta/episodes_stats.jsonl 없음 → process_dataset.py 정제본. "
+                     "native LeRobotDataset 로딩 스킵 (Isaac-GR00T 파인튜닝엔 불필요).")
+            cam_ok = all(any(c in k for k in video_keys)
+                         for c in ("ego_view", "left_wrist", "right_wrist"))
+            cols_ok = all(c in df.columns for c in ("observation.state", "action.wbc"))
+            _p(OK if (cam_ok and cols_ok) else NO,
+               f"VLA-facing 키 로컬 확인: 3카메라={cam_ok} state/action={cols_ok}")
+            ok_all &= cam_ok and cols_ok
+        else:
+            try:
+                from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+                ds = LeRobotDataset(repo_id="verify/tmp", root=str(root))
+                it = ds[0]
+                _p(OK, f"LeRobotDataset 로딩 성공: {len(ds)}프레임 {ds.num_episodes}에피소드")
+                needed = [f"observation.images.{c}" for c in ("ego_view", "left_wrist", "right_wrist")]
+                needed += ["observation.state", "action.wbc"]
+                missing = [k for k in needed if k not in it]
+                if missing:
+                    _p(NO, f"샘플에 누락 키: {missing}")
+                    ok_all = False
+                else:
+                    _p(OK, "ds[0]에 3카메라 + state + action 모두 존재")
+                # 비디오 디코드 확인(검정 아님)
+                for c in ("ego_view", "left_wrist", "right_wrist"):
+                    k = f"observation.images.{c}"
+                    if k in it:
+                        v = it[k]
+                        mean = float(v.float().mean())
+                        black = mean < 0.01
+                        _p(WARN if black else OK,
+                           f"{c}: shape={tuple(v.shape)} 픽셀평균={mean:.3f}"
+                           f"{' (거의 검정?!)' if black else ''}")
+                        ok_all &= not black
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                _p(NO, f"LeRobot 로딩 실패: {type(e).__name__}: {e}")
                 ok_all = False
-            else:
-                _p(OK, "ds[0]에 3카메라 + state + action 모두 존재")
-            # 비디오 디코드 확인(검정 아님)
-            for c in ("ego_view", "left_wrist", "right_wrist"):
-                k = f"observation.images.{c}"
-                if k in it:
-                    v = it[k]
-                    mean = float(v.float().mean())
-                    black = mean < 0.01
-                    _p(WARN if black else OK,
-                       f"{c}: shape={tuple(v.shape)} 픽셀평균={mean:.3f}"
-                       f"{' (거의 검정?!)' if black else ''}")
-                    ok_all &= not black
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            _p(NO, f"LeRobot 로딩 실패: {type(e).__name__}: {e}")
-            ok_all = False
     else:
         print("\n[6] LeRobot 로딩 스킵 (--no-load)")
 
