@@ -32,7 +32,7 @@ for dev in /sys/bus/usb/devices/*/; do
         serial="$(cat "$dev/serial" 2>/dev/null || echo '(none)')"
         speed="$(cat "$dev/speed" 2>/dev/null || echo '?')"
         if echo on | sudo tee "$dev/power/control" >/dev/null 2>&1; then
-            echo "[autosuspend off] $(basename "$dev")  serial=$serial  speed=${speed}Mbps  -> $(cat "$dev/power/control")"
+            echo "[autosuspend off] $(basename "$dev")  serial=$serial (sysfs값, 명령어엔 안 넣음)  speed=${speed}Mbps  -> $(cat "$dev/power/control")"
             found=$((found + 1))
         else
             echo "[warn] $(basename "$dev") power/control 쓰기 실패 (권한?)" >&2
@@ -45,3 +45,6 @@ if [ "$found" -eq 0 ]; then
     exit 1
 fi
 echo "[autosuspend] D405 ${found}대 처리 완료. 이제 3-cam 서버를 실행하세요."
+echo "[autosuspend] ★ 위 serial 은 sysfs(USB 디스크립터) 값입니다 — 카메라 서버"
+echo "[autosuspend]   (HEAD_SERIAL / LEFT/RIGHT_WRIST_SERIAL)엔 이 값을 넣지 마세요."
+echo "[autosuspend]   서버에 넣을 값은 ./docker/list_realsense_serials.sh 의 librealsense 값입니다."
