@@ -44,8 +44,12 @@ else:
     for k in keys:
         arr = np.array(data[k])  # (n, 7)
         thumb, rest = arr[:, :3], arr[:, 3:]
-        frozen = "✅ 상수" if thumb.std(axis=0).max() < 1e-3 else "❌ 변동 있음"
-        print(f"\n{k}:  엄지 판정 {frozen}")
+        # 명령(last_*_hand_action)은 래치값 그대로라 비트 단위 상수여야 하고,
+        # 실측(*_hand_q)은 모터 PD 강성 한계·기구 커플링으로 수 mrad 흔들림이
+        # 정상이다 (실측 2026-07-23: 최대 7e-3 rad = 0.4도).
+        thresh = 1e-9 if "action" in k else 0.02
+        frozen = "✅ 상수" if thumb.std(axis=0).max() < thresh else "❌ 변동 있음"
+        print(f"\n{k}:  엄지 판정 {frozen} (기준 std < {thresh})")
         print(f"  엄지(0-2)  std = {thumb.std(axis=0)}")
         print(f"  엄지(0-2)  값  = {thumb[0]}")
         print(f"  나머지(3-6) std = {rest.std(axis=0)}")

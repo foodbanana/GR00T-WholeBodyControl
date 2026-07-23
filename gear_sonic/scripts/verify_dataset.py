@@ -154,11 +154,11 @@ def verify(root: Path, do_load: bool, do_freeze: bool) -> bool:
     # --- mp4들 ---
     print("\n[1] 프레임 수 일치 & fps")
     mp4s = sorted((root / "videos").rglob("*.mp4"))
-    frame_counts = {}
+    frame_counts = {}  # cam -> {episode_stem: nb_frames}
     for f in mp4s:
         cam = f.parent.name.replace("observation.images.", "")
         v = ffprobe_video(f)
-        frame_counts[cam] = v["nb_frames"]
+        frame_counts.setdefault(cam, {})[f.stem] = v["nb_frames"]
         fps_ok = abs(v["fps"] - fps) < 1e-3
         _p(OK if fps_ok else NO,
            f"{cam}: {v['nb_frames']}프레임 {v['w']}x{v['h']} {v['fps']:.3f}fps {v['duration']:.2f}s")
@@ -166,15 +166,30 @@ def verify(root: Path, do_load: bool, do_freeze: bool) -> bool:
 
     # --- parquet ---
     import pyarrow.parquet as pq
-    pfile = next((root / "data").rglob("*.parquet"))
+    pfiles = sorted((root / "data").rglob("*.parquet"))
+    pfile = pfiles[0]
     df = pq.read_table(pfile).to_pandas()
     n = len(df)
 
-    # 프레임 수 교차검증
-    counts = {"parquet": n, "info.total_frames": total, **frame_counts}
-    all_equal = len(set(counts.values())) == 1
-    _p(OK if all_equal else NO, f"프레임 수 교차검증: {counts} → {'모두 일치' if all_equal else '불일치!'}")
-    ok_all &= all_equal
+    # 프레임 수 교차검증 — 에피소드별로 parquet ↔ 각 카메라 mp4를 비교하고,
+    # parquet 합계를 info.total_frames와 비교한다. (단일 dict 비교는 다중
+    # 에피소드에서 서로 다른 에피소드끼리 비교하게 되어 항상 실패했음)
+    parquet_counts = {p.stem: pq.read_metadata(p).num_rows for p in pfiles}
+    mismatches = []
+    for ep, pn in parquet_counts.items():
+        for cam, eps in frame_counts.items():
+            vn = eps.get(ep)
+            if vn != pn:
+                mismatches.append(f"{ep}/{cam}: mp4={vn} parquet={pn}")
+    total_parquet = sum(parquet_counts.values())
+    if total_parquet != total:
+        mismatches.append(f"parquet 합계 {total_parquet} != info.total_frames {total}")
+    per_ep = {ep: pn for ep, pn in parquet_counts.items()}
+    if not mismatches:
+        _p(OK, f"프레임 수 교차검증: 에피소드별 {per_ep} 3캠 mp4 일치, 합계 {total_parquet} = info.total_frames")
+    else:
+        _p(NO, f"프레임 수 교차검증 불일치: {mismatches}")
+    ok_all &= not mismatches
 
     # --- frame_index 연속성 ---
     print("\n[2] frame_index 연속성")
