@@ -488,6 +488,12 @@ def process_smpl_joints(body_pose, global_orient, transl):
     }
 
 
+# Analog grip mode (--analog_grip): finger closes proportionally to trigger
+# depth instead of snapping open/closed at the 0.5 threshold. Set once at
+# startup from CLI args.
+ANALOG_GRIP = False
+
+
 def generate_finger_data(hand: str, trigger: float, grip: float) -> np.ndarray:
     """
     Generate finger position data from Pico controller button states.
@@ -506,7 +512,13 @@ def generate_finger_data(hand: str, trigger: float, grip: float) -> np.ndarray:
     middle = 10
     # Control thumb based on shoulder button state (index 4 is thumb tip)
     fingertips[4 + thumb, 0, 3] = 1.0  # open thumb
-    if trigger > 0.5:
+    if ANALOG_GRIP:
+        # Analog: middle fingertip approaches the thumb proportionally to
+        # trigger depth. Solver sees dist = 1 - trigger -> grip = trigger,
+        # so q interpolates linearly between open and the close pose.
+        # (Solver-side dead zone < 0.05 filters resting trigger noise.)
+        fingertips[4 + middle, 0, 3] = float(np.clip(trigger, 0.0, 1.0))
+    elif trigger > 0.5:
         fingertips[4 + middle, 0, 3] = 1.0  # close middle
 
     return fingertips
@@ -2156,7 +2168,16 @@ if __name__ == "__main__":
         action="store_true",
         help="Enable SMPL body joint visualization (24 joint spheres) in the VR3pt viewer",
     )
+    parser.add_argument(
+        "--analog_grip",
+        action="store_true",
+        help="Hand closes proportionally to trigger depth (default: binary open/close at 0.5)",
+    )
     args = parser.parse_args()
+
+    if args.analog_grip:
+        ANALOG_GRIP = True
+        print("[Config] Analog grip enabled: hand closure follows trigger depth (0-1)")
 
     # Standalone VR3Pt test modes (exit after finishing)
     if args.vr3pt_test:

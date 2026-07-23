@@ -211,6 +211,7 @@ show_usage() {
     echo "  --input-type TYPE       Set the input type (default: zmq_manager)"
     echo "  --output-type TYPE      Set the output type (default: ros2)"
     echo "  --zmq-host HOST         Set the ZMQ host (default: localhost)"
+    echo "  --freeze-thumb SIDE     Hold Dex3 thumb joints at initial pose during teleop (left|right|both)"
     echo ""
     echo "Interface modes:"
     echo "  sim              Use loopback interface for simulation (MuJoCo)"
@@ -251,6 +252,7 @@ MOTION_DATA="$MOTION_DATA_DEFAULT"
 INPUT_TYPE="$INPUT_TYPE_DEFAULT"
 OUTPUT_TYPE="$OUTPUT_TYPE_DEFAULT"
 ZMQ_HOST="$ZMQ_HOST_DEFAULT"
+FREEZE_THUMB=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -313,6 +315,14 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             ZMQ_HOST="$2"
+            shift 2
+            ;;
+        --freeze-thumb)
+            if [[ "$2" != "left" && "$2" != "right" && "$2" != "both" ]]; then
+                echo -e "${RED}Error: --freeze-thumb requires left, right, or both${NC}" >&2
+                exit 1
+            fi
+            FREEZE_THUMB="$2"
             shift 2
             ;;
         sim|real)
@@ -384,6 +394,11 @@ EXTRA_ARGS=""
 if [[ "$ENV_TYPE" == "sim" ]]; then
     EXTRA_ARGS="--disable-crc-check"
     echo -e "${YELLOW}📋 Simulation mode: CRC check will be disabled${NC}"
+    echo ""
+fi
+if [[ -n "$FREEZE_THUMB" ]]; then
+    EXTRA_ARGS="$EXTRA_ARGS --freeze-thumb $FREEZE_THUMB"
+    echo -e "${YELLOW}📋 Thumb freeze enabled: $FREEZE_THUMB (thumb joints held at initial pose)${NC}"
     echo ""
 fi
 

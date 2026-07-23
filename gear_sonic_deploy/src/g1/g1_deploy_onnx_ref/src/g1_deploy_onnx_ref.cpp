@@ -323,7 +323,18 @@ class G1Deploy {
     // Default 1.0 allows full closure, use --max-close-ratio to limit
     // Keyboard controls (J/K) always available for runtime adjustment
     double initial_max_close_ratio_ = 1.0;
-    
+
+    // Thumb freeze (--freeze-thumb left|right|both): latch the measured thumb
+    // joints (0-2) at the first control tick with valid hand state, then keep
+    // commanding that pose so the thumb stays stationary during teleop.
+    // The frozen values also flow into last_*_hand_action, so the ZMQ log
+    // (g1_debug) records the constant pose consistently.
+    std::string freeze_thumb_ = "none";
+    bool left_thumb_freeze_latched_ = false;
+    bool right_thumb_freeze_latched_ = false;
+    std::array<double, 3> left_thumb_freeze_q_ = {0.0, 0.0, 0.0};
+    std::array<double, 3> right_thumb_freeze_q_ = {0.0, 0.0, 0.0};
+
     // Track if vr_3point_compliance is observed by the policy
     // If false, adjusting compliance via keyboard has no effect on the policy
     bool has_vr_3point_compliance_obs_ = false;
@@ -2156,7 +2167,8 @@ class G1Deploy {
       std::string zmq_out_topic = "g1_debug",
       bool enable_motion_recording = false,
       std::array<double, 3> initial_compliance = {0.05, 0.05, 0.0},
-      double initial_max_close_ratio = 1.0)
+      double initial_max_close_ratio = 1.0,
+      std::string freeze_thumb = "none")
       : time_(0.0),
         publish_dt_(0.002),
         control_dt_(0.02),
@@ -2174,6 +2186,7 @@ class G1Deploy {
         enable_motion_recording_(enable_motion_recording),
         initial_vr_3point_compliance_(initial_compliance),
         initial_max_close_ratio_(initial_max_close_ratio),
+        freeze_thumb_(freeze_thumb),
         //env(ORT_LOGGING_LEVEL_WARNING, "G1Deploy"),
         model_path(model_file_path),
         planner_path(planner_file_path) {
@@ -3950,6 +3963,42 @@ class G1Deploy {
           // Update Dex3 hands max close ratio from keyboard-controlled value (X/C keys)
           dex3_hands_.SetMaxCloseRatio(input_interface_->GetMaxCloseRatio());
           
+          // Freeze thumb joints (0-2) if requested (--freeze-thumb): latch the
+          // measured pose once, then override the teleop targets every tick.
+          // Placed before setAllJointsCommand AND the last_*_hand_action copy
+          // below, so the frozen pose is consistent in both the robot command
+          // and the ZMQ-logged action.
+          if (freeze_thumb_ == "left" || freeze_thumb_ == "both") {
+            if (!left_thumb_freeze_latched_) {
+              const auto st = dex3_hands_.getState(true);
+              if (st && static_cast<int>(st->motor_state().size()) >= 3) {
+                for (int i = 0; i < 3; ++i) left_thumb_freeze_q_[i] = st->motor_state()[i].q();
+                left_thumb_freeze_latched_ = true;
+                std::cout << "[INFO] Left thumb frozen at q = ["
+                          << left_thumb_freeze_q_[0] << ", " << left_thumb_freeze_q_[1]
+                          << ", " << left_thumb_freeze_q_[2] << "]" << std::endl;
+              }
+            }
+            if (left_thumb_freeze_latched_) {
+              for (int i = 0; i < 3; ++i) left_hand_joint_buffer_[i] = left_thumb_freeze_q_[i];
+            }
+          }
+          if (freeze_thumb_ == "right" || freeze_thumb_ == "both") {
+            if (!right_thumb_freeze_latched_) {
+              const auto st = dex3_hands_.getState(false);
+              if (st && static_cast<int>(st->motor_state().size()) >= 3) {
+                for (int i = 0; i < 3; ++i) right_thumb_freeze_q_[i] = st->motor_state()[i].q();
+                right_thumb_freeze_latched_ = true;
+                std::cout << "[INFO] Right thumb frozen at q = ["
+                          << right_thumb_freeze_q_[0] << ", " << right_thumb_freeze_q_[1]
+                          << ", " << right_thumb_freeze_q_[2] << "]" << std::endl;
+              }
+            }
+            if (right_thumb_freeze_latched_) {
+              for (int i = 0; i < 3; ++i) right_hand_joint_buffer_[i] = right_thumb_freeze_q_[i];
+            }
+          }
+
           // set hand poses (use buffered data for consistency)
           dex3_hands_.setAllJointsCommand(true, left_hand_joint_buffer_);
           dex3_hands_.setAllJointsCommand(false, right_hand_joint_buffer_);
@@ -4134,6 +4183,8 @@ int main(int argc, char const* argv[]) {
     std::cout << "  --max-close-ratio <value>: set initial hand max close ratio (0.2-1.0; default: 1.0 = full closure)" << std::endl;
     std::cout << "                             0.2 = limited (80% open), 1.0 = full closure allowed" << std::endl;
     std::cout << "                             Keyboard controls: x/c = +/- 0.1 (always available)" << std::endl;
+    std::cout << "  --freeze-thumb <side>: hold Dex3 thumb joints (0-2) at their initial measured pose (left|right|both)" << std::endl;
+    std::cout << "                         Thumb ignores teleop input; frozen pose is logged in ZMQ hand action/state" << std::endl;
     std::cout << "\nExamples:" << std::endl;
     std::cout << "  " << argv[0] << " enp5s0 policy/single_frame/model.onnx reference/bones_072925_test/ --planner-file policy/planner.onnx --obs-config policy/single_frame/observation_config.yaml --disable-crc-check" << std::endl;
     std::cout << "  " << argv[0] << " enp5s0 policy/token/model.onnx reference/bones_072925_test/ --obs-config policy/token/observation_config.yaml --encoder-file policy/token/encoder.onnx" << std::endl;
@@ -4177,6 +4228,7 @@ int main(int argc, char const* argv[]) {
   std::string zmq_out_topic = "g1_debug";
   std::array<double, 3> initial_compliance = {0.5, 0.5, 0.0}; // initial compliance is 0.5 for both hands (keyboard controllable)
   double initial_max_close_ratio = 1.0; // default allows full closure, use --max-close-ratio to limit
+  std::string freeze_thumb = "none";    // --freeze-thumb left|right|both: hold thumb at initial pose
   for (int i = 4; i < argc; i++) {
     if (std::string(argv[i]) == "--disable-crc-check") {
       disableCrcCheck = true;
@@ -4406,6 +4458,21 @@ int main(int argc, char const* argv[]) {
         std::cerr << "Error: --max-close-ratio requires a value argument" << std::endl;
         exit(1);
       }
+    } else if (std::string(argv[i]) == "--freeze-thumb") {
+      if (i + 1 < argc) {
+        freeze_thumb = argv[i + 1];
+        if (freeze_thumb != "left" && freeze_thumb != "right" && freeze_thumb != "both") {
+          std::cerr << "Error: --freeze-thumb must be left, right, or both (got: "
+                    << freeze_thumb << ")" << std::endl;
+          exit(1);
+        }
+        std::cout << "[INFO] Thumb freeze enabled: " << freeze_thumb
+                  << " (thumb joints 0-2 held at initial measured pose)" << std::endl;
+        i++; // Skip the next argument since it's the side value
+      } else {
+        std::cerr << "Error: --freeze-thumb requires a value argument (left|right|both)" << std::endl;
+        exit(1);
+      }
     }
   }
 
@@ -4438,7 +4505,8 @@ int main(int argc, char const* argv[]) {
     zmq_out_topic,
     enableMotionRecording,
     initial_compliance,
-    initial_max_close_ratio
+    initial_max_close_ratio,
+    freeze_thumb
   );
   std::cout << "[DEBUG] G1Deploy object created successfully!" << std::endl;
   
