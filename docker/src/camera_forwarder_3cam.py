@@ -124,6 +124,7 @@ ZMQ payload (기존 exporter ImageMessageSchema 호환)
 """
 
 import argparse
+import collections
 import fcntl
 import glob
 import os
@@ -143,20 +144,94 @@ from unitree_sdk2py.go2.video.video_client import VideoClient
 
 
 # =============================================================================
+# head-anchored nearest-timestamp matching 튜닝 상수
+# =============================================================================
+# 손목별 링버퍼 깊이. head 프레임 도착 시 이 N개 중 timestamp가 가장 가까운
+# 프레임을 고른다. 30Hz에서 N=5 → 약 166ms(=5/30s) 범위를 커버하므로, head가
+# 다소 늦게/이르게 도착해도 근접 프레임을 확보한다(1칸 latest의 반프레임 오프셋 제거).
+WRIST_BUFFER_SIZE = 5
+# 매칭된 손목 프레임의 |Δ|가 이 값 이상이면 손목 스트림이 정상 30Hz가 아니라는
+# 신호(한 프레임=1/30s≈33ms 이상 어긋남) → stale 경고. 매직넘버 방지용 상단 상수.
+STALE_THRESHOLD_MS = 33.0
+# Δ 통계 롤링 윈도 크기(프레임 수). 30Hz 발행이면 300 ≈ 10초 창.
+SYNC_REPORT_WINDOW = 300
+# Δ 통계(mean/p50/p95/max|Δ|) stdout 리포트 주기(초).
+SYNC_REPORT_INTERVAL_S = 5.0
+# stale 경고 rate-limit(카메라별). 매 publish 스팸을 막고 마지막 경고 후 이 초가
+# 지났을 때만 출력한다.
+STALE_WARN_INTERVAL_S = 1.0
+
+
+# =============================================================================
 # 최신 프레임 슬롯 (스레드 간 공유)
 # =============================================================================
 class LatestFrame:
+    """단일 '최신값' 슬롯. head 캡처 경로와 RAW 프레임 전달에 쓴다.
+
+    ts는 monotonic·wall 두 시계를 함께 보관한다:
+      - mono_ts: 발행 클럭/새 프레임 감지 + head-anchor 매칭·Δ 로깅용(모든 카메라
+        같은 clock이어야 하므로 monotonic).
+      - wall_ts: publish payload의 timestamps 필드용(기존 time.time() 계약 유지 →
+        DGX 소비자, test_latency 무영향). 손목 슬롯엔 None일 수 있다.
+    """
     def __init__(self):
         self._lock = threading.Lock()
-        self._payload = None  # (jpeg_bytes, ts)
+        self._payload = None  # (data, mono_ts, wall_ts)
 
-    def set(self, jpeg_bytes: bytes, ts: float) -> None:
+    def set(self, data, mono_ts: float, wall_ts: float = None) -> None:
         with self._lock:
-            self._payload = (jpeg_bytes, ts)
+            self._payload = (data, mono_ts, wall_ts)
+
+    def put(self, mono_ts: float, wall_ts: float, jpeg_bytes: bytes) -> None:
+        """인코더→발행 sink 인터페이스(WristRingBuffer와 시그니처 공유). head 슬롯은
+        최신값 1칸이므로 두 시계를 모두 보관한다."""
+        self.set(jpeg_bytes, mono_ts, wall_ts)
 
     def get(self):
         with self._lock:
             return self._payload
+
+
+class WristRingBuffer:
+    """손목 JPEG의 최근 N프레임 링버퍼. head anchor에 timestamp-최근접 매칭을
+    하기 위해 1칸 latest 대신 (capture_mono_ts, jpeg_bytes) N개를 보관한다.
+
+    append(인코더 스레드)와 snapshot(발행 루프) 모두 같은 Lock 안에서 수행해
+    스레드 안전을 보장한다. wall_ts는 손목에선 payload에 쓰지 않으므로 저장하지
+    않는다(버퍼 원소는 2-tuple)."""
+    def __init__(self, maxlen: int):
+        self._lock = threading.Lock()
+        self._buf = collections.deque(maxlen=maxlen)
+
+    def append(self, mono_ts: float, jpeg_bytes: bytes) -> None:
+        """(mono_ts, jpeg_bytes) 한 프레임을 버퍼에 추가(오래된 건 자동 폐기)."""
+        with self._lock:
+            self._buf.append((mono_ts, jpeg_bytes))
+
+    def put(self, mono_ts: float, wall_ts: float, jpeg_bytes: bytes) -> None:
+        """인코더→발행 sink 인터페이스(LatestFrame과 시그니처 공유). 손목은 payload에
+        wall을 쓰지 않으므로 wall_ts는 버리고 (mono_ts, jpeg)만 링버퍼에 넣는다."""
+        self.append(mono_ts, jpeg_bytes)
+
+    def snapshot(self) -> list:
+        """lock을 잡고 현재 버퍼의 얕은 복사(list)를 떠서 반환. 발행 루프는 이
+        스냅샷 위에서 lock 없이 argmin 매칭을 수행한다."""
+        with self._lock:
+            return list(self._buf)
+
+
+def _fmt_sync_stats(label: str, deltas) -> str:
+    """부호 있는 Δ(ms) 시퀀스의 mean/p50/p95/max|Δ|를 한 줄로 포맷한다.
+
+    p50/p95는 abs가 아닌 '부호 있는' 값의 백분위 → head 대비 손목이 앞서는지
+    뒤처지는지(bias 방향)를 드러낸다. max|Δ|만 절대값(최악 오프셋)."""
+    arr = np.asarray(deltas, dtype=np.float64)
+    mean = arr.mean()
+    p50 = np.percentile(arr, 50)
+    p95 = np.percentile(arr, 95)
+    max_abs = np.abs(arr).max()
+    return (f"{label}: mean={mean:+.1f}ms p50={p50:+.1f}ms "
+            f"p95={p95:.1f}ms max|Δ|={max_abs:.1f}ms")
 
 
 # 열린 V4L2 cap 레지스트리 — 종료 시 STREAMOFF(release)를 보장해 D405가
@@ -482,7 +557,10 @@ def v4l2_grabber(
             # 새 ndarray를 할당하므로 슬롯에 참조를 담아도 인코더와 안전하다.
             if frame.shape[1] != width or frame.shape[0] != height:
                 frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
-            raw_latest.set(frame, time.time())
+            # 캡처 즉시 두 시계를 함께 스탬프한다. mono는 head-anchor 매칭·Δ 로깅용
+            # (모든 카메라 동일 clock 필요), wall은 head payload의 timestamps 필드용
+            # (기존 time.time() 계약 유지). 손목은 wall을 버퍼에 담지 않고 버린다.
+            raw_latest.set(frame, time.monotonic(), time.time())
             if not ready_event.is_set():
                 ready_event.set()
             frame = None  # 소비 완료 — 다음 루프에서 새 프레임을 읽도록 비운다
@@ -669,7 +747,10 @@ def realsense_grabber(
 
             consec_fail = 0
             did_reset = False   # 정상 프레임이 왔으면 리셋 예산을 되돌린다
-            raw_latest.set(frame, time.time())
+            # 캡처 즉시 두 시계를 함께 스탬프한다. mono는 head-anchor 매칭·Δ 로깅용
+            # (모든 카메라 동일 clock 필요), wall은 head payload의 timestamps 필드용
+            # (기존 time.time() 계약 유지). 손목은 wall을 버퍼에 담지 않고 버린다.
+            raw_latest.set(frame, time.monotonic(), time.time())
             if not ready_event.is_set():
                 ready_event.set()
     finally:
@@ -700,14 +781,18 @@ def _rs_hardware_reset(rs, serial: str, mount: str) -> bool:
 def wrist_encoder(
     mount: str,
     raw_latest: LatestFrame,
-    jpeg_latest: LatestFrame,
+    jpeg_sink,
     jpeg_quality: int,
     stop_event: threading.Event,
     content_hz: dict = None,
 ) -> None:
     """인코딩 전용 스레드. 항상 '가장 최신' RAW만 JPEG로 인코딩한다. 인코딩이
     카메라 레이트보다 느려도 큐가 아니라 최신 슬롯을 읽으므로 오래된 프레임은
-    자연히 건너뛰고(=지연 누적 없음), 발행 루프는 이 JPEG 슬롯을 그대로 소비한다.
+    자연히 건너뛰고(=지연 누적 없음), 발행 루프는 이 sink를 소비한다.
+
+    jpeg_sink는 put(mono_ts, wall_ts, jpeg_bytes)를 구현한 객체다:
+      - head: LatestFrame(최신값 1칸, mono+wall 보관)
+      - 손목: WristRingBuffer(최근 N프레임, mono만 보관).
 
     content_hz(옵션): 진단용 공유 딕셔너리. JPEG 바이트를 해싱해 '내용이 실제로
     바뀐' 프레임만 세어 mount별 콘텐츠 Hz를 기록한다. wedge(같은 옛 프레임 반복)
@@ -747,13 +832,13 @@ def wrist_encoder(
             _tick_log(time.time())   # 멈춰 있어도 0Hz 를 정직하게 보고한다
             time.sleep(0.002)  # 아직 새 프레임 없음 — 살짝 쉬고 재확인
             continue
-        frame, ts = snap
-        last_ts = ts
+        frame, mono_ts, wall_ts = snap
+        last_ts = mono_ts   # 새 프레임 감지는 캡처 mono_ts 기준
         ok, buf = cv2.imencode(".jpg", frame, encode_params)
         if not ok:
             continue
         jpeg_bytes = buf.tobytes()
-        jpeg_latest.set(jpeg_bytes, ts)
+        jpeg_sink.put(mono_ts, wall_ts, jpeg_bytes)
         frame_count += 1
         h = hash(jpeg_bytes)          # 내용 변화 감지(wedge면 동일 바이트 반복)
         if h != last_hash:
@@ -998,9 +1083,9 @@ def main():
         ready_events = {}
         for mount, wserial in serial_map.items():
             raw_latest = LatestFrame()
-            jpeg_latest = LatestFrame()
+            wrist_buf = WristRingBuffer(WRIST_BUFFER_SIZE)   # 인코더 → 발행 루프(최근 N프레임)
             ready = threading.Event()
-            wrist_latests[mount] = jpeg_latest
+            wrist_latests[mount] = wrist_buf
             ready_events[mount] = ready
             tg = threading.Thread(
                 target=realsense_grabber,
@@ -1010,7 +1095,7 @@ def main():
             )
             te = threading.Thread(
                 target=wrist_encoder,
-                args=(mount, raw_latest, jpeg_latest, args.jpeg_quality, stop_event,
+                args=(mount, raw_latest, wrist_buf, args.jpeg_quality, stop_event,
                       content_hz),
                 daemon=True,
             )
@@ -1064,9 +1149,9 @@ def main():
         ready_events = {}
         for mount, spec in spec_map.items():
             raw_latest = LatestFrame()    # 캡처 스레드 → 인코더 스레드 (RAW BGR)
-            jpeg_latest = LatestFrame()   # 인코더 스레드 → 발행 루프 (JPEG)
+            wrist_buf = WristRingBuffer(WRIST_BUFFER_SIZE)   # 인코더 → 발행 루프(최근 N프레임)
             ready = threading.Event()
-            wrist_latests[mount] = jpeg_latest
+            wrist_latests[mount] = wrist_buf
             ready_events[mount] = ready
             tg = threading.Thread(
                 target=v4l2_grabber,
@@ -1076,7 +1161,7 @@ def main():
             )
             te = threading.Thread(
                 target=wrist_encoder,
-                args=(mount, raw_latest, jpeg_latest, args.jpeg_quality, stop_event,
+                args=(mount, raw_latest, wrist_buf, args.jpeg_quality, stop_event,
                       content_hz),
                 daemon=True,
             )
@@ -1147,13 +1232,20 @@ def main():
     # ---- 머리 루프 = 퍼블리시 클럭 -----------------------------------------
     frame_count = 0
     error_count = 0
-    stale_warn = 0
+    skip_no_wrist = 0        # 손목 버퍼가 비어 publish를 건너뛴 횟수(부팅 직후 등)
     head_content_count = 0   # 머리 내용이 실제로 바뀐 프레임 수(RPC가 새 JPEG 반환)
     head_last_hash = None
     last_log = time.time()
-    stale_thresh = 1.0
 
     head_last_pub_ts = None
+
+    # head-anchor 매칭 Δ(부호 있는 ms)의 롤링 윈도 + 경고 rate-limit 상태.
+    # sync_deltas[mount]: 최근 SYNC_REPORT_WINDOW 프레임의 (ts_matched-ts_head)*1000.
+    # last_stale_warn[mount]: 마지막 stale 경고 시각(STALE_WARN_INTERVAL_S rate-limit).
+    sync_deltas = {m: collections.deque(maxlen=SYNC_REPORT_WINDOW)
+                   for m in wrist_latests}
+    last_stale_warn = {m: 0.0 for m in wrist_latests}
+    last_sync_report = time.time()
 
     try:
         while True:
@@ -1169,8 +1261,8 @@ def main():
                     time.sleep(0.002)
                 if snap is None:
                     break
-                head_bytes, ts = snap
-                head_last_pub_ts = ts
+                head_bytes, head_mono, head_wall = snap
+                head_last_pub_ts = head_mono   # 새 head 프레임 감지는 캡처 mono 기준
                 # 콘텐츠 Hz는 encoder가 content_hz[head_mount]에 이미 기록한다.
             else:
                 code, data = client.GetImageSample()
@@ -1182,7 +1274,8 @@ def main():
                     time.sleep(0.05)
                     continue
 
-                ts = time.time()
+                head_mono = time.monotonic()   # 매칭 anchor·Δ 로깅용
+                head_wall = time.time()         # payload timestamps용(기존 계약 유지)
                 head_bytes = bytes(data)
                 # 진단: RPC가 준 raw 바이트(리사이즈 전 = 진짜 소스 콘텐츠)를 해싱.
                 # GetImageSample은 새 프레임이 없으면 직전 바이트를 재반환하므로,
@@ -1201,21 +1294,44 @@ def main():
                                            [int(cv2.IMWRITE_JPEG_QUALITY), args.jpeg_quality])
                     if _ok:
                         head_bytes = _b.tobytes()
+            # payload timestamps는 기존과 동일하게 head의 wall 시계를 쓴다(모든 mount
+            # 동일 값 = head_wall). 실제 per-camera 오프셋은 아래 Δ 로깅으로 확인 →
+            # DGX 소비자(test_latency 포함) 계약 무변경.
             images = {args.head_mount: head_bytes}
-            timestamps = {args.head_mount: ts}
+            timestamps = {args.head_mount: head_wall}
 
-            for mount, latest in wrist_latests.items():
-                snap = latest.get()
-                if snap is None:
-                    break
-                jpeg_bytes, ts_w = snap
-                images[mount] = jpeg_bytes
-                timestamps[mount] = ts_w
-                if ts - ts_w > stale_thresh:
-                    stale_warn += 1
-                    if stale_warn <= 3 or stale_warn % 60 == 0:
-                        print(f"[3cam] WARNING: {mount} 프레임 오래됨 "
-                              f"({ts - ts_w:.2f}s)", flush=True)
+            # head anchor에 대해 각 손목 버퍼에서 |ts_wrist - ts_head| 최소 프레임 선택.
+            skip_publish = False
+            for mount in wrist_latests:
+                buf_snapshot = wrist_latests[mount].snapshot()
+                if not buf_snapshot:
+                    # 부팅 직후 등 버퍼가 아직 비어 있음 → 완전한 페이로드를 못 만드므로
+                    # 이번 publish 전체를 건너뛴다(부분 발행 안 함).
+                    skip_publish = True
+                    nowm = time.monotonic()
+                    if nowm - last_stale_warn[mount] >= STALE_WARN_INTERVAL_S:
+                        last_stale_warn[mount] = nowm
+                        print(f"[sync] WARN: {mount} buffer empty, skipping publish "
+                              f"(head_ts={head_mono:.3f})", flush=True)
+                    continue
+                best_ts, best_jpeg = min(
+                    buf_snapshot, key=lambda e: abs(e[0] - head_mono))
+                delta_ms = (best_ts - head_mono) * 1000.0   # 부호 포함(abs 아님)
+                images[mount] = best_jpeg
+                timestamps[mount] = head_wall
+                sync_deltas[mount].append(delta_ms)
+                # stale: |Δ|가 한 프레임(33ms) 이상이면 손목 스트림이 정상 30Hz 아님.
+                if abs(delta_ms) >= STALE_THRESHOLD_MS:
+                    nowm = time.monotonic()
+                    if nowm - last_stale_warn[mount] >= STALE_WARN_INTERVAL_S:
+                        last_stale_warn[mount] = nowm
+                        print(f"[sync] WARN: {mount} stale, |Δ|={abs(delta_ms):.1f}ms "
+                              f"(buffer size={len(buf_snapshot)}, "
+                              f"head_ts={head_mono:.3f}, matched_ts={best_ts:.3f})",
+                              flush=True)
+
+            if skip_publish:
+                skip_no_wrist += 1
             else:
                 # 검증용: left_wrist를 right_wrist로 복제(D405 1대로 2-wrist 스키마 검증)
                 if (args.mirror_left_to_right and "left_wrist" in images
@@ -1225,6 +1341,19 @@ def main():
                 socket.send(msgpack.packb(
                     {"timestamps": timestamps, "images": images}, use_bin_type=True))
                 frame_count += 1
+
+            # ---- Δ 리포트(측정 게이트 M0): 매 SYNC_REPORT_INTERVAL_S초 ------------
+            now_rep = time.time()
+            if now_rep - last_sync_report >= SYNC_REPORT_INTERVAL_S:
+                last_sync_report = now_rep
+                parts = []
+                for mount in sorted(sync_deltas):   # left_wrist < right_wrist
+                    dq = sync_deltas[mount]
+                    if not dq:
+                        continue
+                    parts.append(_fmt_sync_stats(mount.replace("_wrist", ""), dq))
+                if parts:
+                    print(f"[sync] {'  '.join(parts)}", flush=True)
 
             now = time.time()
             if now - last_log >= args.fps_log_interval:
@@ -1244,7 +1373,8 @@ def main():
                     parts.append(f"{m}={content_hz[m]:.1f}Hz")
                 print(f"[3cam] content(new frames): {'  '.join(parts)}", flush=True)
                 print(f"[3cam] publish fps: {fps:.1f} | keys={sorted(images.keys())} "
-                      f"| head errors={error_count}", flush=True)
+                      f"| head errors={error_count} | skip(empty buf)={skip_no_wrist}",
+                      flush=True)
                 frame_count = 0
                 head_content_count = 0
                 last_log = now
