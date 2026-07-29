@@ -111,6 +111,12 @@ if [[ "${HEAD_BACKEND:-realsense}" == "realsense" ]]; then
     if [[ -n "${HEAD_SERIAL:-}" ]]; then
         FWD_ARGS+=(--head-serial "$HEAD_SERIAL")
     fi
+    # HEAD_AE_PRIORITY=0 → 머리 프레임레이트 고정(30fps 유지, 어두우면 노출 캡).
+    # 미지정이면 센서 기본(=노출 우선, 어두우면 fps 저하). 30Hz 안 뜨면 0으로 시도.
+    if [[ -n "${HEAD_AE_PRIORITY:-}" ]]; then
+        FWD_ARGS+=(--head-ae-priority "$HEAD_AE_PRIORITY")
+        echo "[ltw-camera-server] HEAD_AE_PRIORITY=$HEAD_AE_PRIORITY → 머리 auto_exposure_priority 설정"
+    fi
     echo "[ltw-camera-server] HEAD_BACKEND=realsense → librealsense 직결 " \
          "(${HEAD_WIDTH:-640}x${HEAD_HEIGHT:-480}@${HEAD_FPS:-30}, serial=${HEAD_SERIAL:-auto})"
     echo "[ltw-camera-server]   videohub_pc4는 정지시키지 않는다 (RSUSB로 공존)"
@@ -134,6 +140,10 @@ if [[ "${WRIST_BACKEND:-v4l2}" == "realsense" ]]; then
     fi
     if [[ -n "${RIGHT_WRIST_SERIAL:-}" ]]; then
         FWD_ARGS+=(--right-wrist-serial "$RIGHT_WRIST_SERIAL")
+    fi
+    if [[ -n "${WRIST_AE_PRIORITY:-}" ]]; then
+        FWD_ARGS+=(--wrist-ae-priority "$WRIST_AE_PRIORITY")
+        echo "[ltw-camera-server] WRIST_AE_PRIORITY=$WRIST_AE_PRIORITY → 손목 auto_exposure_priority 설정"
     fi
     echo "[ltw-camera-server] WRIST_BACKEND=realsense → 손목도 librealsense 직결" \
          "(${WRIST_FPS:-30}fps, serial=${LEFT_WRIST_SERIAL:-auto}/${RIGHT_WRIST_SERIAL:-auto})"

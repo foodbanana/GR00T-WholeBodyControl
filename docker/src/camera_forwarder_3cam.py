@@ -620,6 +620,36 @@ def _rs_pick_wrist_serials(rs):
     return sorted(serial for name, serial in _rs_devices(rs) if "405" in name)
 
 
+def _rs_set_ae_priority(rs, pipeline, mount: str, ae_priority: int) -> None:
+    """활성 color 센서의 RS2_OPTION_AUTO_EXPOSURE_PRIORITY 를 설정한다.
+
+    0 이면 프레임레이트를 일정하게(예: 30fps) 유지하고 어두운 장면에선 노출을
+    프레임 주기 안으로 캡한다. 1(센서 기본)이면 노출을 우선해 어두우면 fps 가
+    30 밑으로 떨어진다. 미지원/실패 시 조용히 로그만 남기고 넘어간다."""
+    try:
+        device = pipeline.get_active_profile().get_device()
+        color = None
+        try:
+            color = device.first_color_sensor()
+        except Exception:
+            # 일부 바인딩엔 first_color_sensor 가 없다 — 옵션 지원 센서를 직접 탐색.
+            for s in device.query_sensors():
+                if s.supports(rs.option.auto_exposure_priority):
+                    color = s
+                    break
+        if color is None or not color.supports(rs.option.auto_exposure_priority):
+            print(f"[3cam][{mount}] 경고: auto_exposure_priority 미지원 — 무시",
+                  flush=True)
+            return
+        color.set_option(rs.option.auto_exposure_priority, float(ae_priority))
+        mode = "프레임레이트 고정" if ae_priority == 0 else "노출 우선"
+        print(f"[3cam][{mount}] auto_exposure_priority={ae_priority} 설정 ({mode})",
+              flush=True)
+    except Exception as e:
+        print(f"[3cam][{mount}] auto_exposure_priority 설정 실패: "
+              f"{type(e).__name__}: {e}", flush=True)
+
+
 def _rs_print_color_profiles(rs, serial: str, mount: str) -> None:
     """start 실패 시 이 장치가 실제로 지원하는 color 프로파일을 찍어준다.
 
@@ -654,6 +684,7 @@ def realsense_grabber(
     fps: int,
     stop_event: threading.Event,
     ready_event: threading.Event,
+    ae_priority: int = None,
 ) -> None:
     """머리 D435i를 librealsense로 직접 읽는 캡처 전용 스레드.
 
@@ -692,6 +723,11 @@ def realsense_grabber(
                     _register_pipeline(mount, pipeline)
                     print(f"[3cam][{mount}] librealsense started "
                           f"serial={serial} {width}x{height}@{fps} bgr8", flush=True)
+                    # auto_exposure_priority: 0=프레임레이트 고정(30fps 유지, 어두우면
+                    # 노출을 33ms로 캡), 1=노출 우선(기본, 어두우면 fps 저하). None=센서
+                    # 기본값 그대로 둠. (재)시작마다 재적용해 재연결에도 유지된다.
+                    if ae_priority is not None:
+                        _rs_set_ae_priority(rs, pipeline, mount, ae_priority)
                     consec_fail = 0
                 except Exception as e:
                     pipeline = None
@@ -876,6 +912,12 @@ def main():
                         help="realsense 백엔드의 머리 color 요청 높이")
     parser.add_argument("--head-fps", type=int, default=30,
                         help="realsense 백엔드의 머리 color 요청 fps")
+    parser.add_argument("--head-ae-priority", type=int, default=None,
+                        choices=(0, 1),
+                        help="머리(realsense) color 센서의 auto_exposure_priority. "
+                             "0=프레임레이트 고정(30fps 유지, 어두우면 노출 캡), "
+                             "1=노출 우선(센서 기본, 어두우면 fps 저하). "
+                             "미지정=센서 기본값 그대로.")
     parser.add_argument("--timeout", type=float, default=3.0)
     parser.add_argument("--fps-log-interval", type=float, default=5.0)
 
@@ -901,6 +943,10 @@ def main():
                         help="realsense 백엔드에서 right_wrist로 쓸 D405 시리얼")
     parser.add_argument("--wrist-fps", type=int, default=30,
                         help="realsense 백엔드의 손목 color 요청 fps")
+    parser.add_argument("--wrist-ae-priority", type=int, default=None,
+                        choices=(0, 1),
+                        help="손목(realsense) color 센서의 auto_exposure_priority. "
+                             "--head-ae-priority와 동일 의미. 미지정=센서 기본값.")
     parser.add_argument("--wrist-width", type=int, default=640)
     parser.add_argument("--wrist-height", type=int, default=480)
     parser.add_argument("--jpeg-quality", type=int, default=80)
@@ -1090,7 +1136,8 @@ def main():
             tg = threading.Thread(
                 target=realsense_grabber,
                 args=(wserial, mount, raw_latest, args.wrist_width,
-                      args.wrist_height, args.wrist_fps, stop_event, ready),
+                      args.wrist_height, args.wrist_fps, stop_event, ready,
+                      args.wrist_ae_priority),
                 daemon=True,
             )
             te = threading.Thread(
@@ -1195,7 +1242,7 @@ def main():
             target=realsense_grabber,
             args=(args.head_serial, args.head_mount, head_raw,
                   args.head_width, args.head_height, args.head_fps,
-                  stop_event, head_ready),
+                  stop_event, head_ready, args.head_ae_priority),
             daemon=True,
         )
         te = threading.Thread(
