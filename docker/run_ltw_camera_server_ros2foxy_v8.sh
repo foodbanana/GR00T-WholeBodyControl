@@ -37,18 +37,29 @@
 #
 # ★ 머리 시리얼: HEAD_SERIAL 미지정 시 forwarder가 "이름에 405가 없는" 장치를
 #   자동 선택한다 — V4L2로 이미 열려 있는 손목 D405 2대를 librealsense가
-#   건드리면 안 되기 때문이다. 명시하려면 (구 로봇 기준) 253843061423.
-#   장치 목록 확인:
-#     docker run --rm -v /dev:/dev --device-cgroup-rule='c 81:* rmw' \
-#       --device-cgroup-rule='c 189:* rmw' ltw-camera-server:1.1-foxy-3cam \
-#       python3 /app/camera_forwarder_3cam.py --list-devices
-#   (D405 by-id 노드 + librealsense 장치 시리얼을 함께 출력한다)
+#   건드리면 안 되기 때문이다.
+#   ※ 머리 유닛은 지금까지 두 번 교체됐다(D435i 346122071399 → D435 938422073271
+#     → 2026-07-29 현재 D455 046322250434). **여기 적힌 값을 믿지 말고 매번
+#     아래 스크립트로 실측할 것.** 시리얼을 잘못 넣으면 librealsense가
+#     "No device connected" 재시도 루프를 돌며 USB 버스를 흔들어 머리가 아예
+#     안 뜨고 손목까지 ~3Hz로 떨어진다(카메라 고장으로 오진하기 쉬움).
+#   장치 목록 확인 (래퍼 사용 권장):
+#     ./docker/list_realsense_serials.sh
+#   (D405 by-id 노드 + librealsense 장치 시리얼을 함께 출력한다.
+#    ★ 명령어에 넣는 값은 언제나 후자 = librealsense 시리얼)
 #
 # Usage:
 #   ./docker/run_ltw_camera_server_ros2foxy_v8.sh
 #
+# 실전 사용 예 (head-only 데이터 수집 — 손목 D405 미연결, 2026-07-29 현재 구성):
+#   NO_WRISTS=1 HEAD_SERIAL=046322250434 \
+#     sudo -E ./docker/run_ltw_camera_server_ros2foxy_v8.sh
+#   # head-only에선 [sync] 로그가 안 나온다(맞출 손목이 없으니 정상).
+#   # 건강 신호는 content(new frames): ego_view=29Hz + publish fps.
+#   # DGX exporter에선 --record-wrist-cameras 를 뺀다(ego_view만 스키마에 들어감).
+#
 # 실전 사용 예 (3-cam 데이터 수집, 머리 librealsense 직결):
-#   HEAD_SERIAL=253843061423 \
+#   HEAD_SERIAL=<list_realsense_serials.sh로 실측> \
 #   LEFT_NODE=/dev/v4l/by-id/usb-Intel_R__RealSense_TM__Depth_Camera_405_Intel_R__RealSense_TM__Depth_Camera_405_255323073651-video-index4 \
 #   RIGHT_NODE=/dev/v4l/by-id/usb-Intel_R__RealSense_TM__Depth_Camera_405_Intel_R__RealSense_TM__Depth_Camera_405_255323071827-video-index4 \
 #   ./docker/run_ltw_camera_server_ros2foxy_v8.sh

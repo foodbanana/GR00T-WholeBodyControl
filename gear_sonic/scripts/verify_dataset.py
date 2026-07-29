@@ -148,7 +148,10 @@ def verify(root: Path, do_load: bool, do_freeze: bool) -> bool:
     fps = info["fps"]
     total = info["total_frames"]
     video_keys = [k for k, v in info["features"].items() if v.get("dtype") == "video"]
-    print(f"[info.json] fps={fps} total_frames={total} video_keys={[k.split('.')[-1] for k in video_keys]} "
+    # 카메라 구성은 info.json에서 읽는다. 3캠(ego+손목2) 하드코딩이면 head-only 수집
+    # (exporter에서 --record-wrist-cameras 뺀 경우)이 [6]에서 항상 오탐 FAIL 났다.
+    cams = [k.split(".")[-1] for k in video_keys]
+    print(f"[info.json] fps={fps} total_frames={total} video_keys={cams} "
           f"codebase={info.get('codebase_version')}")
 
     # --- mp4들 ---
@@ -186,7 +189,8 @@ def verify(root: Path, do_load: bool, do_freeze: bool) -> bool:
         mismatches.append(f"parquet 합계 {total_parquet} != info.total_frames {total}")
     per_ep = {ep: pn for ep, pn in parquet_counts.items()}
     if not mismatches:
-        _p(OK, f"프레임 수 교차검증: 에피소드별 {per_ep} 3캠 mp4 일치, 합계 {total_parquet} = info.total_frames")
+        _p(OK, f"프레임 수 교차검증: 에피소드별 {per_ep} {len(cams)}캠 mp4 일치, "
+               f"합계 {total_parquet} = info.total_frames")
     else:
         _p(NO, f"프레임 수 교차검증 불일치: {mismatches}")
     ok_all &= not mismatches
@@ -240,11 +244,10 @@ def verify(root: Path, do_load: bool, do_freeze: bool) -> bool:
             # VLA가 실제로 쓰는 키(3카메라 비디오 + state + action)의 로컬 존재만 확인한다.
             _p(WARN, "meta/episodes_stats.jsonl 없음 → process_dataset.py 정제본. "
                      "native LeRobotDataset 로딩 스킵 (Isaac-GR00T 파인튜닝엔 불필요).")
-            cam_ok = all(any(c in k for k in video_keys)
-                         for c in ("ego_view", "left_wrist", "right_wrist"))
+            cam_ok = bool(cams) and (root / "videos").exists()
             cols_ok = all(c in df.columns for c in ("observation.state", "action.wbc"))
             _p(OK if (cam_ok and cols_ok) else NO,
-               f"VLA-facing 키 로컬 확인: 3카메라={cam_ok} state/action={cols_ok}")
+               f"VLA-facing 키 로컬 확인: 카메라{cams}={cam_ok} state/action={cols_ok}")
             ok_all &= cam_ok and cols_ok
         else:
             try:
@@ -252,16 +255,15 @@ def verify(root: Path, do_load: bool, do_freeze: bool) -> bool:
                 ds = LeRobotDataset(repo_id="verify/tmp", root=str(root))
                 it = ds[0]
                 _p(OK, f"LeRobotDataset 로딩 성공: {len(ds)}프레임 {ds.num_episodes}에피소드")
-                needed = [f"observation.images.{c}" for c in ("ego_view", "left_wrist", "right_wrist")]
-                needed += ["observation.state", "action.wbc"]
+                needed = list(video_keys) + ["observation.state", "action.wbc"]
                 missing = [k for k in needed if k not in it]
                 if missing:
                     _p(NO, f"샘플에 누락 키: {missing}")
                     ok_all = False
                 else:
-                    _p(OK, "ds[0]에 3카메라 + state + action 모두 존재")
+                    _p(OK, f"ds[0]에 {len(cams)}카메라{cams} + state + action 모두 존재")
                 # 비디오 디코드 확인(검정 아님)
-                for c in ("ego_view", "left_wrist", "right_wrist"):
+                for c in cams:
                     k = f"observation.images.{c}"
                     if k in it:
                         v = it[k]
