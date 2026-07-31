@@ -150,16 +150,10 @@ from unitree_sdk2py.go2.video.video_client import VideoClient
 # 프레임을 고른다. 30Hz에서 N=5 → 약 166ms(=5/30s) 범위를 커버하므로, head가
 # 다소 늦게/이르게 도착해도 근접 프레임을 확보한다(1칸 latest의 반프레임 오프셋 제거).
 WRIST_BUFFER_SIZE = 5
-# 매칭된 손목 프레임의 |Δ|가 이 값 이상이면 손목 스트림이 정상 30Hz가 아니라는
-# 신호(한 프레임=1/30s≈33ms 이상 어긋남) → stale 경고. 매직넘버 방지용 상단 상수.
-STALE_THRESHOLD_MS = 33.0
 # Δ 통계 롤링 윈도 크기(프레임 수). 30Hz 발행이면 300 ≈ 10초 창.
 SYNC_REPORT_WINDOW = 300
 # Δ 통계(mean/p50/p95/max|Δ|) stdout 리포트 주기(초).
 SYNC_REPORT_INTERVAL_S = 5.0
-# stale 경고 rate-limit(카메라별). 매 publish 스팸을 막고 마지막 경고 후 이 초가
-# 지났을 때만 출력한다.
-STALE_WARN_INTERVAL_S = 1.0
 
 
 # =============================================================================
@@ -1335,12 +1329,10 @@ def main():
 
     head_last_pub_ts = None
 
-    # head-anchor 매칭 Δ(부호 있는 ms)의 롤링 윈도 + 경고 rate-limit 상태.
+    # head-anchor 매칭 Δ(부호 있는 ms)의 롤링 윈도.
     # sync_deltas[mount]: 최근 SYNC_REPORT_WINDOW 프레임의 (ts_matched-ts_head)*1000.
-    # last_stale_warn[mount]: 마지막 stale 경고 시각(STALE_WARN_INTERVAL_S rate-limit).
     sync_deltas = {m: collections.deque(maxlen=SYNC_REPORT_WINDOW)
                    for m in wrist_latests}
-    last_stale_warn = {m: 0.0 for m in wrist_latests}
     last_sync_report = time.time()
 
     try:
@@ -1403,12 +1395,8 @@ def main():
                 if not buf_snapshot:
                     # 부팅 직후 등 버퍼가 아직 비어 있음 → 완전한 페이로드를 못 만드므로
                     # 이번 publish 전체를 건너뛴다(부분 발행 안 함).
+                    # 건너뛴 횟수는 아래 주기 로그의 skip(empty buf) 로 보고한다.
                     skip_publish = True
-                    nowm = time.monotonic()
-                    if nowm - last_stale_warn[mount] >= STALE_WARN_INTERVAL_S:
-                        last_stale_warn[mount] = nowm
-                        print(f"[sync] WARN: {mount} buffer empty, skipping publish "
-                              f"(head_ts={head_mono:.3f})", flush=True)
                     continue
                 best_ts, best_jpeg = min(
                     buf_snapshot, key=lambda e: abs(e[0] - head_mono))
@@ -1416,15 +1404,6 @@ def main():
                 images[mount] = best_jpeg
                 timestamps[mount] = head_wall
                 sync_deltas[mount].append(delta_ms)
-                # stale: |Δ|가 한 프레임(33ms) 이상이면 손목 스트림이 정상 30Hz 아님.
-                if abs(delta_ms) >= STALE_THRESHOLD_MS:
-                    nowm = time.monotonic()
-                    if nowm - last_stale_warn[mount] >= STALE_WARN_INTERVAL_S:
-                        last_stale_warn[mount] = nowm
-                        print(f"[sync] WARN: {mount} stale, |Δ|={abs(delta_ms):.1f}ms "
-                              f"(buffer size={len(buf_snapshot)}, "
-                              f"head_ts={head_mono:.3f}, matched_ts={best_ts:.3f})",
-                              flush=True)
 
             if skip_publish:
                 skip_no_wrist += 1
