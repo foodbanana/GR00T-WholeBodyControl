@@ -1,60 +1,40 @@
 # =============================================================================
-# ltw-camera-server:1.0-foxy-3cam
+# ltw-camera-server:1.0-foxy-3cam   (v7 — v8 의 롤백 대상)
 #
-# v6(0.9-foxy-3cam)와 기능적으로 동일하되, v5 이미지에 의존하지 않는
-# 단독(standalone) 빌드다. v6는 `FROM ltw-camera-server:0.8-foxy-videoclient`
-# 라서 v5 이미지가 로컬에 이미 존재하는 머신에서만 빌드됐다 — 즉 그 로봇을
-# 떠나는 순간 재현이 불가능했다. v7은 v5의 모든 레이어를 인라인해서 새 로봇
-# (또는 초기화된 Orin)에서 이 파일 하나로 처음부터 빌드된다.
+# 머리(ego_view, VideoClient RPC) + 좌우 손목(D405, 커널 V4L2)을 하나의
+# ZMQ 5555 페이로드로 합쳐 발행한다. workstation 의
+# run_data_exporter.py --record-wrist-cameras 와 짝을 이룬다.
 #
-# 결과: 머리(ego_view, VideoClient RPC) + 좌우 손목(D405, V4L2)을 하나의
-#       ZMQ 5555 페이로드로 합쳐 forward. workstation의
-#       run_data_exporter.py --record-wrist-cameras 와 짝을 이룬다.
+# v6(0.9-foxy-3cam)와 기능은 같되 v5 이미지에 의존하지 않는 standalone 빌드다.
+# v6 는 `FROM ltw-camera-server:0.8-foxy-videoclient` 라서 v5 이미지가 로컬에
+# 있는 머신에서만 빌드됐다. v7 은 v5 의 레이어를 인라인해 이 파일 하나로
+# 새 로봇에서도 처음부터 빌드된다.
 #
-# Target: Unitree G1 Orin NX (PC2, eth0 192.168.123.164/24, aarch64,
+# 현재 사용하는 것은 v8(1.1-foxy-3cam)이다. 이 파일은 v8 의 머리 librealsense
+# 직결에 문제가 생겼을 때 돌아올 경로(머리 = videohub RPC)로 보존한다.
+# forwarder(camera_forwarder_3cam.py)는 v8 과 같은 파일을 쓴다.
+#
+# Target: Unitree G1 Orin NX (eth0 192.168.123.164/24, aarch64,
 #         JetPack R35.3.1 / Ubuntu 20.04 focal, Python 3.8)
 #
-# [v6 대비 변경 사항]
-#   1. base를 v5 이미지 → nvcr.io/nvidia/l4t-jetpack:r35.3.1 로 교체하고
-#      v5의 섹션 1~8을 이 파일에 인라인 (동작 변화 없음, 순수 병합).
-#   2. CMD의 `--wrist-fps 30` 제거 — camera_forwarder_3cam.py argparse에
-#      존재하지 않는 인자다. run 스크립트가 항상 CMD를 덮어써서 드러나지
-#      않았을 뿐, 인자 없이 `docker run` 하면 v6는 즉시 죽는다.
-#   3. pyrealsense2는 유지하되 "현재 미사용"임을 명시 (섹션 5.5 참조).
+# [새 로봇에서 빌드하기 전 실측할 것] — 버전 핀이 전부 구 G1 Orin NX 기준이다
+#   1) videohub CycloneDDS 버전 (섹션 3.5 의 0.10.2)
+#        sudo ldd /proc/$(pgrep videohub_pc4)/exe | grep dds
+#   2) JetPack/L4T 버전 (r35.3.1 = Python 3.8 전제 — 섹션 4.7/5 핀의 근거)
+#        cat /etc/nv_tegra_release
+#   3) D405 color 노드 by-id 경로 (-video-indexN 은 커널 열거 순서로 바뀐다)
+#        ls /dev/v4l/by-id/
 #
-# [빌드 전 필수 실측 — 새 로봇에서]
-#   이 이미지의 버전 핀은 전부 "구 G1 Orin NX"의 실측값에 맞춰져 있다.
-#   새 로봇에서 아래 3개가 다르면 그에 맞게 고쳐야 한다:
-#     1) videohub CycloneDDS 버전 (섹션 3.5의 0.10.2가 여기 걸려 있음)
-#          sudo ldd /proc/$(pgrep videohub_pc4)/exe | grep dds
-#     2) JetPack/L4T 버전 (r35.3.1 = Python 3.8 전제, 섹션 4.7/5 핀의 근거)
-#          cat /etc/nv_tegra_release
-#     3) D405 color 노드 by-id 경로 (시리얼은 동일하나 -video-indexN 은
-#        커널 열거 순서에 따라 바뀔 수 있다)
-#          ls /dev/v4l/by-id/
-#
-# [Build] (Orin NX에서, docker/ 를 build context로 — src/, config/ 상대 경로
-#          COPY 때문에 docker/ 루트로 지정해야 한다)
+# [Build] docker/ 를 build context 로 줘야 한다 (COPY 가 상대경로)
 #   docker build -f docker/Dockerfile.ltw_camera_server_ros2foxy_v7 \
 #                -t ltw-camera-server:1.0-foxy-3cam docker/
 #
 # [Run]
 #   ./docker/run_ltw_camera_server_ros2foxy_v7.sh
-#
-# [Rollback]
-#   docker rm -f ltw-camera-server 2>/dev/null
-#   docker rmi ltw-camera-server:1.0-foxy-3cam
-#
-# [이력]
-#   0.1~0.7 의 시행착오(rclpy topic subscribe 실패 → VideoClient RPC 전환,
-#   CycloneDDS wire protocol mismatch 추적)는 Dockerfile.ltw_camera_server_*
-#   시리즈에 학습 자산으로 보존돼 있다. 이 파일은 그 결론만 담는다.
 # =============================================================================
 
-# l4t-jetpack r35.3.1 = JetPack 5.1.1 = Ubuntu 20.04(focal) 기반 — 호스트
-# OS(Ubuntu 20.04, Foxy)와 정확히 일치. Jetson용 CUDA/L4T 런타임 레이어를
-# 이미 포함하고 있어 향후 GPU 가속(예: 영상 처리)이 필요해질 때 base 교체
-# 없이 확장 가능하다. 이 컨테이너 자체는 GPU를 쓰지 않는다.
+# l4t-jetpack r35.3.1 = JetPack 5.1.1 = Ubuntu 20.04(focal) — 호스트 OS/Foxy 와
+# 일치. 이 컨테이너 자체는 GPU 를 쓰지 않지만 향후 확장 여지로 유지한다.
 FROM nvcr.io/nvidia/l4t-jetpack:r35.3.1
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -66,9 +46,8 @@ SHELL ["/bin/bash", "-c"]
 # -----------------------------------------------------------------------------
 # 1. Base tools + locale
 # -----------------------------------------------------------------------------
-# build-essential + cmake: 섹션 3.5의 CycloneDDS 소스빌드에 필요.
-# python3-dev, libpython3-dev: 섹션 4.5에서 --no-binary cyclonedds 소스빌드 시
-#   Python.h 헤더 필요.
+# build-essential/cmake: 섹션 3.5 CycloneDDS 소스빌드용.
+# python3-dev/libpython3-dev: 섹션 4.5 cyclonedds 소스빌드 시 Python.h 필요.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
@@ -88,8 +67,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # -----------------------------------------------------------------------------
 # 2. ROS 2 Foxy apt source
 # -----------------------------------------------------------------------------
-# r35.3.1 = Ubuntu 20.04 = focal 이므로 ROS 2 공식 apt repo의 focal 라인을
-# 그대로 사용한다 (별도 backport/PPA 불필요).
 RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
         -o /usr/share/keyrings/ros-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" \
@@ -98,13 +75,11 @@ RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
 # -----------------------------------------------------------------------------
 # 3. ROS 2 Foxy + rmw-cyclonedds (apt)
 # -----------------------------------------------------------------------------
-# 이 스택은 rclpy/rmw를 실제로는 거치지 않는다(VideoClient RPC가 Python
-# cyclonedds binding으로 libddsc를 직접 호출). 그럼에도 Foxy를 유지하는 이유:
-#   (1) 향후 다른 센서 통합 시 활용 여지
-#   (2) rosidl-generator-dds-idl 를 Python cyclonedds가 IDL 처리에 쓸 수 있음
-# 여기서 apt로 딸려오는 CycloneDDS 0.7.x(libddsc.so.0)는 그대로 두되, 섹션
-# 3.6의 LD_LIBRARY_PATH override로 런타임에는 우리가 소스빌드한 0.10.2가
-# 우선 로드된다 — apt 패키지를 지울 필요 없이 로드되는 .so만 바꿔치기한다.
+# 이 스택은 rclpy/rmw 를 실제로 거치지 않는다(VideoClient RPC 가 Python
+# cyclonedds binding 으로 libddsc 를 직접 호출). 그래도 Foxy 를 유지하는 것은
+# 향후 센서 통합 여지와 rosidl-generator-dds-idl 때문이다.
+# 여기서 딸려오는 apt CycloneDDS 0.7.x 는 지우지 않는다 — 섹션 3.6 의
+# LD_LIBRARY_PATH 순서로 우리 0.10.2 가 먼저 로드된다.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-catkin-pkg \
         python3-empy \
@@ -118,25 +93,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # -----------------------------------------------------------------------------
 # 3.5. CycloneDDS 0.10.2 (source build) — 이 이미지의 핵심
 # -----------------------------------------------------------------------------
-# 왜 0.10.2 소스빌드인가 (v1~v2 실패의 근본 원인):
-#   호스트 videohub_pc4는 CycloneDDS 0.10.2 소스빌드를 쓰는데, apt의
-#   ros-foxy-cyclonedds는 0.7.0이라 DDSI-RTPS wire protocol이 mismatch였다.
-#   (segfault, bad_alloc, discovery 후 data zero 등으로 발현)
-#
-# 구 로봇 실측:
-#   sudo ldd /proc/$(pgrep videohub_pc4)/exe | grep dds
-#   → libddsc.so.0 => /home/unitree/cyclonedds_ws/install/cyclonedds/lib/libddsc.so.0
-#   sudo cat /proc/$(pgrep videohub_pc4)/maps | grep dds
-#   → libddsc.so.0.10.2
-#
-# ★ 새 로봇에서 이 값을 반드시 재확인할 것. 다르면 CYCLONEDDS_VERSION과
-#   섹션 4.5의 Python binding 버전을 함께 그 값으로 맞춰야 한다. 버전이
-#   어긋나면 크래시 없이 조용히 discovery만 실패한다 — 진단이 어렵다.
-#
-# 이 버전은 두 가지 목적을 겸한다:
-#   (1) 호스트 videohub_pc4와 wire protocol 매칭
-#   (2) unitree_sdk2py의 setup.py가 요구하는 cyclonedds==0.10.2 Python
-#       binding의 C library 백엔드 제공 (섹션 4.5)
+# 호스트 videohub_pc4 가 0.10.2 를 쓰는데 apt 의 ros-foxy-cyclonedds 는 0.7.0
+# 이라 DDSI-RTPS wire protocol 이 mismatch 였다(segfault / discovery 후 data
+# zero 등으로 발현). 버전이 어긋나면 크래시 없이 조용히 discovery 만 실패해
+# 진단이 어렵다. 이 버전은 unitree_sdk2py 가 요구하는 Python binding
+# cyclonedds==0.10.2 의 C library 백엔드도 겸한다(섹션 4.5).
 ARG CYCLONEDDS_VERSION=0.10.2
 
 WORKDIR /opt
@@ -151,16 +112,13 @@ RUN cmake .. \
     && cmake --build . --target install \
     && rm -rf /opt/cyclonedds/build
 
-# 참고: ENABLE_SHM을 명시하지 않고 CycloneDDS 기본값을 그대로 쓴다(구 로봇에서
-# 이 구성으로 검증됨). SHM 관련 문제가 생기면 -DENABLE_SHM=OFF 검토.
+# ENABLE_SHM 은 기본값을 쓴다. SHM 문제가 생기면 -DENABLE_SHM=OFF 검토.
 
 # -----------------------------------------------------------------------------
 # 3.6. CycloneDDS ENV (LD_LIBRARY_PATH override)
 # -----------------------------------------------------------------------------
-# LD_LIBRARY_PATH의 순서가 결정적이다:
-#   /opt/cyclonedds/install/lib   ← 우리 0.10.2, 먼저 있어야 함
-#   /opt/ros/foxy/lib             ← apt 0.7.0, 뒤에 있어야 함
-# 로더가 이 순서로 검색해 우리 0.10.2를 먼저 찾는다. apt 것은 무시된다.
+# 순서가 결정적이다 — 우리 0.10.2(/opt/cyclonedds/install/lib)가 apt 0.7.0
+# (/opt/ros/foxy/lib)보다 **앞**에 있어야 한다.
 ENV CYCLONEDDS_HOME=/opt/cyclonedds/install
 ENV CycloneDDS_DIR=/opt/cyclonedds/install/lib/cmake/CycloneDDS
 ENV CMAKE_PREFIX_PATH=/opt/cyclonedds/install:/opt/ros/foxy
@@ -170,18 +128,16 @@ ENV PATH=/opt/cyclonedds/install/bin:${PATH}
 # -----------------------------------------------------------------------------
 # 4. Python packaging preparation
 # -----------------------------------------------------------------------------
-# setuptools 59.6.0은 kist-drl-g1-onboard 팀이 검증한 안정 버전. 최신
-# setuptools는 ament_python 등과 충돌 가능하므로 고정한다.
+# setuptools 는 59.6.0 고정 — 최신은 ament_python 등과 충돌 가능.
 RUN python3 -m pip install --upgrade pip wheel \
     && python3 -m pip install --force-reinstall "setuptools==59.6.0"
 
 # -----------------------------------------------------------------------------
 # 4.5. Python CycloneDDS binding (source build, 0.10.2)
 # -----------------------------------------------------------------------------
-# unitree_sdk2_python의 setup.py가 정확히 cyclonedds==0.10.2를 요구한다.
-# --no-binary cyclonedds: pre-built wheel은 자체 CycloneDDS를 번들해서 섹션
-#   3.5의 소스빌드본과 충돌할 위험이 있으므로 소스에서 빌드한다. 빌드 시
-#   CYCLONEDDS_HOME(섹션 3.6)을 참조해 우리 C library로 링크된다.
+# unitree_sdk2_python 이 정확히 cyclonedds==0.10.2 를 요구한다.
+# --no-binary: prebuilt wheel 은 자체 CycloneDDS 를 번들해 섹션 3.5 소스빌드본과
+#   충돌할 수 있다. 소스빌드하면 CYCLONEDDS_HOME 을 참조해 우리 것으로 링크된다.
 RUN python3 -m pip install --no-cache-dir \
     --no-binary cyclonedds \
     "cyclonedds==0.10.2"
@@ -189,15 +145,11 @@ RUN python3 -m pip install --no-cache-dir \
 # -----------------------------------------------------------------------------
 # 4.6. unitree_sdk2_python — 머리 카메라 접근의 핵심
 # -----------------------------------------------------------------------------
-# Unitree 공식 Python SDK. VideoClient, ChannelFactoryInitialize 등 제공.
-# /api/videohub/request 로 RPC를 보내면 완전한 JPEG 응답이 온다. (Go2 SDK지만
-# G1도 동일한 /api/videohub/* endpoint를 노출해 그대로 동작한다.)
-#
-# --no-deps: 이미 소스빌드한 cyclonedds를 pip이 다른 버전으로 교체하지
-#   못하도록 막는다.
-# 커밋 SHA pin: --no-deps라 pip이 setup.py의 요구사항을 검증하지 않으므로,
-#   upstream이 cyclonedds==0.10.2 요구를 바꾸면 버전 매칭이 조용히 깨질 수
-#   있다. clone 시점을 SHA로 못 박아 재현성을 확보한다.
+# VideoClient 로 /api/videohub/request RPC 를 보내면 JPEG 응답이 온다
+# (Go2 SDK 지만 G1 도 같은 endpoint 를 노출한다).
+# --no-deps: 소스빌드한 cyclonedds 가 pip 에 의해 교체되는 것을 막는다.
+# 커밋 SHA pin: --no-deps 라 pip 이 요구사항을 검증하지 않으므로, upstream 이
+#   cyclonedds 버전 요구를 바꿔도 조용히 깨지지 않도록 시점을 못 박는다.
 ARG UNITREE_SDK2PY_COMMIT=37116c521f1588482e238d8450e471ba78ab9863
 
 WORKDIR /opt
@@ -207,16 +159,12 @@ RUN git clone https://github.com/unitreerobotics/unitree_sdk2_python.git \
     && python3 -m pip install --no-deps .
 
 # -----------------------------------------------------------------------------
-# 4.7. numpy, opencv (unitree_sdk2py 요구사항 + 손목 V4L2 캡처)
+# 4.7. numpy, opencv
 # -----------------------------------------------------------------------------
-# --no-deps로 unitree_sdk2py를 설치했으므로 여기서 별도 install.
-# opencv는 단순 의존성이 아니라 손목 캡처의 주역이다 — camera_forwarder_3cam이
-# cv2.VideoCapture(node, CAP_V4L2)로 D405 color 노드를 직접 읽는다(섹션 5.5).
-#
-# 버전 pin 이유: aarch64 + Python 3.8 조합에서 최신 opencv/numpy는 prebuilt
-# wheel이 없어 소스빌드로 떨어지거나 실패한다. 아래 두 버전은 이 조합에서
-# prebuilt wheel(manylinux_2_17_aarch64, cp38)이 존재하는 마지막 stable 버전.
-# ★ 새 로봇의 Python이 3.8이 아니면 이 핀은 전부 무효다.
+# --no-deps 로 unitree_sdk2py 를 깔았으므로 여기서 별도 설치.
+# opencv 는 손목 V4L2 캡처의 주역이다(cv2.VideoCapture).
+# 버전 pin: aarch64 + Python 3.8 조합에서 prebuilt wheel 이 존재하는 마지막
+# stable. ★ Python 이 3.8 이 아니면 이 핀은 전부 무효다.
 RUN python3 -m pip install --no-cache-dir \
     "numpy==1.24.4" \
     "opencv-python-headless==4.8.1.78"
@@ -224,37 +172,29 @@ RUN python3 -m pip install --no-cache-dir \
 # -----------------------------------------------------------------------------
 # 5. Python 런타임 의존성 (ZMQ 발행)
 # -----------------------------------------------------------------------------
-# pyzmq==25.1.2 / msgpack==1.0.5: 마찬가지로 aarch64 + Python 3.8 prebuilt
-# wheel이 존재하는 버전. 더 최신은 소스빌드로 떨어져 r35.3.1에서 실패한다.
+# 마찬가지로 aarch64 + Python 3.8 prebuilt wheel 이 있는 버전.
 RUN python3 -m pip install --no-cache-dir \
         "pyzmq==25.1.2" \
         "msgpack==1.0.5"
 
 # -----------------------------------------------------------------------------
-# 5.5. libusb + pyrealsense2 — 현재 미사용, 의도적으로 보존
+# 5.5. libusb + pyrealsense2 (pip wheel) — v7 에서는 미사용
 # -----------------------------------------------------------------------------
-# ★ 중요: forwarder는 pyrealsense2를 import 하지 않는다. 손목 D405는 커널
-#   V4L2(cv2.VideoCapture)로 읽는다. 이유는 camera_forwarder_3cam.py 헤더에
-#   기록돼 있다 — 이 Jetson에서 pip pyrealsense2(RSUSB/libuvc 백엔드)는 장치
-#   열거는 되지만 wait_for_frames가 0프레임이다. 커널 uvcvideo가 D405 비디오
-#   인터페이스를 점유해 libuvc가 못 뺏기 때문.
+# v7 의 forwarder 는 pyrealsense2 를 쓰지 않는다. 머리는 VideoClient RPC,
+# 손목은 커널 V4L2(cv2.VideoCapture)로 읽는다. 이 pip wheel 은 V4L2 백엔드라
+# 순정 uvcvideo 의 XU 컨트롤 한계에 걸려 wait_for_frames 가 0프레임이다.
+# 그것을 넘으려면 RSUSB 소스빌드가 필요하고, 그게 v8 이다.
 #
-# 그럼에도 이 레이어를 남기는 이유: 손목 wedge(간헐 스트림 정지)의 근본
-# 해결책 후보가 "D405만 uvcvideo에서 언바인드 → RSUSB(pyrealsense2)로 전환"
-# 이고, 그 경로에서 이 레이어가 그대로 필요하다. raw V4L2에는 D405 펌웨어를
-# 되살릴 XU(extension unit) 리셋 명령이 없어서 물리 replug 외에 복구 수단이
-# 없다 — pyrealsense2로 가야 하는 진짜 이유는 성능이 아니라 복구 수단이다.
-# wheel 한 줄이라 빌드 비용이 싸므로 미리 깔아둔다.
+# 그럼에도 남겨두는 이유: wheel 한 줄이라 빌드 비용이 싸고, 손목 wedge 복구
+# 수단(XU 리셋)이 raw V4L2 에는 없어 언젠가 이 경로로 가야 하기 때문이다.
 #
-# librealsense apt 저장소는 쓰지 않는다: Intel repo의 InRelease를 서명한
-# 키(FB0B24895113F120)가 배포 중인 librealsense.pgp에 없어 apt-get update가
-# GPG 검증 실패(NO_PUBKEY)로 죽는다. 그리고 불필요하다 — pip wheel이
-# librealsense 런타임을 자체 번들한다. libusb-1.0-0만 우분투 main(별도 키
-# 불필요)에서 깔아둔다 — wheel이 USB 접근에 이 .so를 dlopen 할 수 있다.
+# librealsense apt 저장소는 쓰지 않는다 — Intel repo 의 InRelease 서명 키
+# (FB0B24895113F120)가 배포 중인 librealsense.pgp 에 없어 apt-get update 가
+# NO_PUBKEY 로 죽는다. 필요하지도 않다(wheel 이 런타임을 자체 번들). libusb-1.0-0
+# 만 우분투 main 에서 깐다 — wheel 이 USB 접근에 dlopen 할 수 있다.
 #
-# --no-deps: 섹션 4.7에서 핀 고정한 numpy/opencv를 pyrealsense2가 다른
-#   버전으로 끌어올리지 못하게 막는다.
-# 검증: pyrealsense2에는 __version__ 속성이 없으므로 핵심 심볼로 확인한다.
+# --no-deps: 섹션 4.7 에서 핀 고정한 numpy/opencv 가 끌어올려지지 않게 막는다.
+# 검증: pyrealsense2 에는 __version__ 이 없으므로 핵심 심볼로 확인한다.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libusb-1.0-0 \
     && rm -rf /var/lib/apt/lists/*
@@ -265,28 +205,24 @@ RUN python3 -m pip install --no-cache-dir --no-deps "pyrealsense2" \
 # -----------------------------------------------------------------------------
 # 6. Runtime env
 # -----------------------------------------------------------------------------
-# RMW_IMPLEMENTATION은 설정하지 않는다 — VideoClient는 rclpy/rmw 레이어를
-#   거치지 않고 Python cyclonedds binding이 libddsc를 직접 호출하므로 rmw
-#   구현 선택 자체가 무의미하다.
-# ROS_DOMAIN_ID: 호스트 videohub_pc4와 같은 domain(0)이어야
-#   /api/videohub/request, /response RPC discovery가 된다.
-# CYCLONEDDS_URI: Python cyclonedds binding이 이 config를 읽어 eth0을 쓴다.
+# RMW_IMPLEMENTATION 은 설정하지 않는다 — VideoClient 는 rclpy/rmw 를 거치지
+#   않고 Python cyclonedds binding 이 libddsc 를 직접 호출한다.
+# ROS_DOMAIN_ID: videohub_pc4 와 같은 domain(0)이어야 RPC discovery 가 된다.
+# CYCLONEDDS_URI: Python cyclonedds binding 이 이 config 로 eth0 을 쓴다.
 ENV ROS_DOMAIN_ID=0
 ENV CYCLONEDDS_URI=file:///etc/cyclonedds.xml
 
 # -----------------------------------------------------------------------------
 # 7. App
 # -----------------------------------------------------------------------------
-# ※ 머리만 A/B로 확인하려면 --no-wrists (run 스크립트의 NO_WRISTS=1)를 쓴다.
+# ※ 머리만 A/B 로 확인하려면 --no-wrists (run 스크립트의 NO_WRISTS=1)를 쓴다.
 WORKDIR /app
 COPY src/camera_forwarder_3cam.py /app/camera_forwarder_3cam.py
 COPY config/cyclonedds.xml /etc/cyclonedds.xml
 
 # -----------------------------------------------------------------------------
-# 8. 개발 편의 (/root/.bashrc) — docker exec로 들어가 디버깅할 때
+# 8. 개발 편의 (/root/.bashrc) — docker exec 로 들어가 디버깅할 때
 # -----------------------------------------------------------------------------
-# ENV로 이미 이미지 전체에 박혀 있지만, 여기 다시 적는 이유는 이 파일 하나만
-# 보고도 exec 진입 시 어떤 값이 유효한지 바로 확인할 수 있게 하기 위함이다.
 RUN { \
         echo "export CYCLONEDDS_HOME=/opt/cyclonedds/install"; \
         echo "export CycloneDDS_DIR=/opt/cyclonedds/install/lib/cmake/CycloneDDS"; \
@@ -299,21 +235,16 @@ RUN { \
 # -----------------------------------------------------------------------------
 # 9. Runtime notes / CMD
 # -----------------------------------------------------------------------------
-# - 이 컨테이너는 D405 USB 장치를 직접 연다. run 스크립트에서 USB
-#   패스스루(-v /dev:/dev + device-cgroup-rule)를 반드시 넘겨야 한다.
-#   (전용 run_ltw_camera_server_ros2foxy_v7.sh 참조)
-# - --network host 필요: VideoClient CycloneDDS discovery + ZMQ 5555.
-# - 이 컨테이너는 videohub_pc4/호스트 서비스를 절대 정지·재시작하지 않는다.
-#   D405는 우리 카메라이고 우리 노드만 open 하므로 다른 팀 피드에 영향 없다.
-# - CMD를 JSON 배열(exec form)로 지정해 셸 없이 python3가 PID 1이 된다.
-#   ROS 2 setup.bash를 source할 필요도 없다 — 필요한 값은 전부 ENV에 있다.
+# - USB 장치를 직접 연다. run 스크립트가 -v /dev:/dev + device-cgroup-rule 로
+#   패스스루를 넘겨야 한다.
+# - --network host 필요(VideoClient DDS discovery + ZMQ 5555).
+# - 호스트 서비스(videohub_pc4 등)를 정지·재시작하지 않는다.
+# - CMD 는 exec form 이라 셸 없이 python3 가 PID 1 이 된다. ROS 2 setup.bash 를
+#   source 할 필요가 없다 — 필요한 값은 전부 ENV 에 있다.
 EXPOSE 5555
 
-# 손목 좌우가 바뀌면 --left-node/--right-node로 고정할 것(run 스크립트가
-# 환경변수로 넘긴다). 미지정 시 by-id 시리얼 정렬 자동배정 + 매핑 로그 출력.
-# NOTE: v6 CMD에 있던 `--wrist-fps 30`은 제거했다 — argparse에 없는 인자다
-#       (run 스크립트가 CMD를 항상 덮어써서 드러나지 않았을 뿐, 인자 없이
-#       docker run 하면 v6는 unrecognized arguments로 즉사한다).
+# 손목 좌우가 바뀌면 run 스크립트에서 --left-node/--right-node 로 고정한다.
+# 미지정 시 by-id 시리얼 정렬로 자동배정하고 매핑을 로그에 찍는다.
 CMD ["python3", "/app/camera_forwarder_3cam.py", \
      "--port", "5555", \
      "--head-mount", "ego_view", \
