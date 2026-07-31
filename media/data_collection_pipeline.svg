@@ -46,7 +46,7 @@
   <text x="505" y="168" font-size="11" fill="#555">30 Hz</text>
 
   <!-- ================= camera server (Orin) ================= -->
-  <rect x="60" y="195" width="520" height="245" fill="#fafafa" stroke="#333" stroke-width="1.6" rx="4"/>
+  <rect x="60" y="195" width="520" height="265" fill="#fafafa" stroke="#333" stroke-width="1.6" rx="4"/>
   <text x="320" y="217" text-anchor="middle" font-size="13" font-weight="bold" fill="#111">Camera server — Unitree G1 onboard (Orin NX)</text>
 
   <rect x="85"  y="232" width="120" height="32" fill="#fff" stroke="#555" stroke-width="1.2" rx="3"/>
@@ -56,32 +56,49 @@
   <rect x="435" y="232" width="120" height="32" fill="#fff" stroke="#555" stroke-width="1.2" rx="3"/>
   <text x="495" y="253" text-anchor="middle" font-size="11" fill="#111">JPEG encoding</text>
 
-  <!-- head: publish trigger straight into msgpack -->
-  <line x1="145" y1="264" x2="145" y2="337" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
-  <text x="153" y="292" font-size="11" font-weight="bold" fill="#111">Publish</text>
-  <text x="153" y="306" font-size="11" font-weight="bold" fill="#111">trigger</text>
+  <!-- ===== JPEG 버퍼 (머리 1칸 / 손목 5칸 링버퍼) ===== -->
+  <line x1="145" y1="264" x2="145" y2="287" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+  <rect x="85" y="290" width="120" height="30" fill="#fff" stroke="#555" stroke-width="1.2" rx="3"/>
+  <text x="145" y="309" text-anchor="middle" font-size="10" fill="#111">LatestFrame 1칸</text>
+  <line x1="145" y1="320" x2="145" y2="357" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+  <text x="153" y="336" font-size="11" font-weight="bold" fill="#111">Publish</text>
+  <text x="153" y="349" font-size="11" font-weight="bold" fill="#111">trigger</text>
 
   <line x1="320" y1="264" x2="320" y2="287" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
-  <rect x="260" y="290" width="120" height="30" fill="#fff" stroke="#555" stroke-width="1.2" rx="3"/>
-  <text x="320" y="310" text-anchor="middle" font-size="11" fill="#111">JPEG - latest</text>
-  <line x1="320" y1="320" x2="320" y2="337" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+  <text x="258" y="283" font-size="9" fill="#666">링버퍼 5칸</text>
+  <g fill="#fff" stroke="#555" stroke-width="1.2">
+    <rect x="260" y="290" width="24" height="30" rx="2"/>
+    <rect x="284" y="290" width="24" height="30" rx="2"/>
+    <rect x="308" y="290" width="24" height="30" rx="2"/>
+    <rect x="332" y="290" width="24" height="30" rx="2"/>
+    <rect x="356" y="290" width="24" height="30" rx="2"/>
+  </g>
+  <line x1="320" y1="320" x2="320" y2="357" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
 
   <line x1="495" y1="264" x2="495" y2="287" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
-  <rect x="435" y="290" width="120" height="30" fill="#fff" stroke="#555" stroke-width="1.2" rx="3"/>
-  <text x="495" y="310" text-anchor="middle" font-size="11" fill="#111">JPEG - latest</text>
-  <line x1="495" y1="320" x2="495" y2="337" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+  <text x="433" y="283" font-size="9" fill="#666">링버퍼 5칸</text>
+  <g fill="#fff" stroke="#555" stroke-width="1.2">
+    <rect x="435" y="290" width="24" height="30" rx="2"/>
+    <rect x="459" y="290" width="24" height="30" rx="2"/>
+    <rect x="483" y="290" width="24" height="30" rx="2"/>
+    <rect x="507" y="290" width="24" height="30" rx="2"/>
+    <rect x="531" y="290" width="24" height="30" rx="2"/>
+  </g>
+  <line x1="495" y1="320" x2="495" y2="357" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
 
-  <rect x="85" y="340" width="470" height="42" fill="#fff" stroke="#333" stroke-width="1.3" rx="3"/>
-  <text x="320" y="358" text-anchor="middle" font-size="12" fill="#111">msgpack</text>
-  <text x="320" y="374" text-anchor="middle" font-size="11" fill="#555">(3 JPEG + timestamp)</text>
+  <rect x="85" y="360" width="470" height="42" fill="#fff" stroke="#333" stroke-width="1.3" rx="3"/>
+  <text x="320" y="378" text-anchor="middle" font-size="12" fill="#111">msgpack</text>
+  <text x="320" y="394" text-anchor="middle" font-size="11" fill="#555">(3 JPEG + timestamp)</text>
 
-  <rect x="390" y="392" width="170" height="20" fill="#fff" stroke="#888" stroke-width="1" rx="2"/>
-  <text x="475" y="406" text-anchor="middle" font-size="10" fill="#333">camera_forwarder_3cam.py</text>
-  <rect x="390" y="414" width="170" height="20" fill="#fff" stroke="#888" stroke-width="1" rx="2"/>
-  <text x="475" y="428" text-anchor="middle" font-size="10" fill="#333">docker container</text>
+  <text x="90" y="424" font-size="9.5" fill="#666">머리 도착 시각에 가장 가까운 손목 프레임 선택</text>
+
+  <rect x="390" y="412" width="170" height="20" fill="#fff" stroke="#888" stroke-width="1" rx="2"/>
+  <text x="475" y="426" text-anchor="middle" font-size="10" fill="#333">camera_forwarder_3cam.py</text>
+  <rect x="390" y="434" width="170" height="20" fill="#fff" stroke="#888" stroke-width="1" rx="2"/>
+  <text x="475" y="448" text-anchor="middle" font-size="10" fill="#333">docker container</text>
 
   <!-- ================= 5555 down to DGX ================= -->
-  <line x1="300" y1="440" x2="300" y2="557" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+  <line x1="300" y1="460" x2="300" y2="557" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
   <text x="315" y="472" font-size="12" font-weight="bold" fill="#111">ZMQ port 5555</text>
   <text x="315" y="490" font-size="11" fill="#555">msgpack (3 JPEG + timestamp)</text>
 
