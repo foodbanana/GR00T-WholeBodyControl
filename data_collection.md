@@ -14,7 +14,6 @@ LeRobot v2.1 데이터셋을 수집하는 파이프라인의 운영 문서.
 | 리포 경로 (Orin) | `~/tw_gearsonic/GR00T-WholeBodyControl` |
 | 리포 경로 (DGX) | `~/GR00T-WholeBodyControl` |
 
->  **Orin과 DGX의 리포 경로가 다르다.** 오타가 아니다. 터미널 1만 Orin이고, 나머지는 전부 DGX다.
 
 ---
 
@@ -31,9 +30,9 @@ LeRobot v2.1 데이터셋을 수집하는 파이프라인의 운영 문서.
 
 | 실행 위치 | 파일 | 역할 |
 |---|---|---|
-| Orin | [docker/list_realsense_serials.sh](docker/list_realsense_serials.sh) | **실행 전 필수** — librealsense 시리얼 열거 (§4) |
-| Orin | [docker/disable_d405_autosuspend.sh](docker/disable_d405_autosuspend.sh) | **실행 전 필수** — D405 USB autosuspend 해제 (§5) |
-| DGX | [gear_sonic/scripts/verify_dataset.py](gear_sonic/scripts/verify_dataset.py) | 수집 후 데이터셋 검증 (§8) |
+| Orin | [docker/list_realsense_serials.sh](docker/list_realsense_serials.sh) | **실행 전 필수** — librealsense 시리얼 열거 (§3) |
+| Orin | [docker/disable_d405_autosuspend.sh](docker/disable_d405_autosuspend.sh) | **실행 전 필수** — D405 USB autosuspend 해제 (§4) |
+| DGX | [gear_sonic/scripts/verify_dataset.py](gear_sonic/scripts/verify_dataset.py) | 수집 후 데이터셋 검증 (§7) |
 | DGX | [gear_sonic/scripts/run_camera_viewer.py](gear_sonic/scripts/run_camera_viewer.py) | 카메라 피드 실시간 확인(디버깅) |
 | DGX | [gear_sonic_deploy/deploy.sh](gear_sonic_deploy/deploy.sh) | C++ deploy 실행 → 5557로 로봇 상태 발행 |
 
@@ -61,41 +60,7 @@ LeRobot v2.1 데이터셋을 수집하는 파이프라인의 운영 문서.
 
 ---
 
-## 2. 설계 근거
-
-### 2.1 RSUSB 백엔드 (`-DFORCE_RSUSB_BACKEND=true`)
-
-Docker 이미지 안의 pyrealsense2는 librealsense v2.55.1을 **RSUSB 백엔드로 소스빌드**한 것이다.
-커널 V4L2/uvcvideo를 우회하고 libusb로 카메라를 직접 제어하므로 XU 컨트롤이 통과되고,
-D405 wedge(스트림 정지)에서 벗어날 여지와 `hardware_reset()`이라는 실질적 복구 수단이 생긴다.
-
-> ★ **이 이미지를 지우면 재빌드에 약 40분이 걸린다.** 사전점검에서 이미지 존재 확인이
-> 가장 중요한 이유다. 롤백용 `1.0-foxy-3cam`(v7)도 함께 보존한다.
-
-### 2.2 머리 카메라가 퍼블리시 클럭이다 (`--camera-triggered`)
-
-카메라 서버는 loop마다 발행하지 않는다. **머리 카메라에 새 프레임이 도착할 때만**
-손목 최신 JPEG 2장을 함께 묶어 5555로 발행한다. exporter도 `--camera-triggered`로
-"카메라 프레임 도착 = 1 데이터 프레임"으로 동작한다.
-
-- 자유 실행 50Hz 루프에서 생기는 **중복 프레임이 사라진다.**
-- 저장 레이트 = 카메라 레이트가 되고, timestamp는 `frame_index / fps`의 균일 그리드로 찍혀
-  `verify_dataset.py`의 시간축 검사를 통과한다.
-
-### 2.3 `--dataset-fps 25`인 이유
-
-`dataset_fps`는 mp4와 `info.json`에 **찍히는** fps다. 실제 발행 레이트가 이 값보다 낮으면
-같은 프레임 수를 더 짧은 시간에 재생하게 되어 **영상이 빠른 배속으로 재생된다.**
-
-머리 카메라 실측이 ≈29Hz이므로, 프레임 드롭이 나도 25Hz 아래로는 잘 안 내려가도록
-안전 마진을 두고 25로 고정했다. 카메라 트리거는 이 값에 맞춰 실시간 그리드로 다운샘플된다.
-
-> **변경 가능하다.** 다만 올릴 때는 반드시 터미널 1의 실측 Hz를 먼저 확인하고,
-> 그보다 확실히 낮은 값으로 잡을 것. 올렸다가 실제 레이트가 못 따라오면 배속 재생이 된다.
-
----
-
-## 3. Step 1 — 사전점검 (Orin, 재부팅 후 매번)
+## 2. Step 1 — 사전점검 (Orin, 재부팅 후 매번)
 
 ```bash
 # --- DGX에서 Orin 접속 ---
@@ -125,7 +90,7 @@ git status                             # clean 이어야 함
 
 ---
 
-## 4. Step 2 — 카메라 시리얼 실측 ★ 매번 필수
+## 3. Step 2 — 카메라 시리얼 실측 ★ 매번 필수
 
 ```bash
 # Orin에서
@@ -194,7 +159,7 @@ WRIST_BACKEND=realsense HEAD_SERIAL=046322250434 \
 
 ---
 
-## 5. Step 3 — 실행 (터미널 5개, 순서 중요)
+## 4. Step 3 — 실행 (터미널 5개, 순서 중요)
 
 > ⚠️ **녹화(터미널 4 exporter)는 맨 마지막에, 카메라 서버가 안정화된 것을 확인한 뒤에만 시작한다.**
 > 안정화 전에 녹화하면 앞부분이 손목 정지 프레임으로 오염되어 검증에서 FAIL 난다.
@@ -299,7 +264,7 @@ python gear_sonic/scripts/run_data_exporter.py \
 
 ---
 
-## 6. Step 4 — 텔레오퍼레이션 & 에피소드 녹화 (PICO VR)
+## 5. Step 4 — 텔레오퍼레이션 & 에피소드 녹화 (PICO VR)
 
 exporter는 켜져 있어도 바로 저장하지 않는다. **에피소드 단위로 조작자가 토글**한다.
 
@@ -334,7 +299,7 @@ exporter는 켜져 있어도 바로 저장하지 않는다. **에피소드 단�
 
 ---
 
-## 7. Step 5 — 종료 절차
+## 6. Step 5 — 종료 절차
 
 **순서를 지킬 것. 로봇을 먼저 세운다.**
 
@@ -349,7 +314,7 @@ exporter는 켜져 있어도 바로 저장하지 않는다. **에피소드 단�
 
 ---
 
-## 8. Step 6 — 데이터셋 검증 (DGX)
+## 7. Step 6 — 데이터셋 검증 (DGX)
 
 ```bash
 cd ~/GR00T-WholeBodyControl
@@ -378,7 +343,7 @@ python gear_sonic/scripts/verify_dataset.py outputs/<이번_날짜폴더>
 
 ---
 
-## 9. 산출물 구조
+## 8. 산출물 구조
 
 ```
 outputs/<YYYY-MM-DD-HH-MM-SS>/          # --dataset-name 미지정 시 실행 시각으로 자동 생성
@@ -400,7 +365,7 @@ proprio/pose는 카메라 프레임 도착 시점의 최신값으로 스냅샷�
 
 ---
 
-## 10. CLI 옵션 레퍼런스
+## 9. CLI 옵션 레퍼런스
 
 ### `run_data_exporter.py` (DGX) — 주요 옵션
 
@@ -413,8 +378,8 @@ proprio/pose는 카메라 프레임 도착 시점의 최신값으로 스냅샷�
 | `--sonic-zmq-port` | `5556` | pico_manager pose |
 | `--state-zmq-port` | `5557` | C++ deploy 로봇 상태 + robot_config |
 | `--record-wrist-cameras` | `False` | 손목 2대까지 기록. **페이로드에 3키가 모두 있어야 함** |
-| `--camera-triggered` | `False` | 카메라 프레임 도착을 클럭으로 사용 (§2.2) |
-| `--dataset-fps` | `30` | mp4/info.json에 찍히는 fps. 3-cam 구성에서는 **25** (§2.3) |
+| `--camera-triggered` | `False` | 카메라 프레임 도착을 클럭으로 사용 (§11.2) |
+| `--dataset-fps` | `30` | mp4/info.json에 찍히는 fps. 3-cam 구성에서는 **25** (§11.3) |
 | `--use-nvenc` | `False` | GB10 하드웨어 NVENC(h264_nvenc) 인코딩. 소프트웨어 libx264의 처리량 병목 해소 |
 | `--camera-decode-reduce` | `2` | JPEG를 1/N 해상도로 디코드. 3-cam에서는 **1**(손목 화질 보존, ego_view에만 reduce 적용됨) |
 | `--cv2-num-threads` | `1` | OpenCV 스레드 상한. 다른 프로세스와의 코어 경합 방지 |
@@ -436,7 +401,7 @@ proprio/pose는 카메라 프레임 도착 시점의 최신값으로 스냅샷�
 
 ---
 
-## 11. Orin NX Docker 구성
+## 10. Orin NX Docker 구성
 
 `docker/` 안에 Dockerfile이 여러 개 있지만, **실제로 사용하는 것은 v8 하나뿐이다.**
 
@@ -520,3 +485,36 @@ docker build -f docker/Dockerfile.ltw_camera_server_ros2foxy_v8 \
 | `probe_v4l2.py` | `/dev/video*` 경로로 D405 color를 읽을 수 있는지 확인하는 진단 |
 | `zmq_3cam_check.py` | consumer 쪽(DGX)에서 5555 페이로드에 어떤 카메라 키가 오는지 확인 |
 
+---
+
+## 11. 설계 근거
+
+### 11.1 RSUSB 백엔드 (`-DFORCE_RSUSB_BACKEND=true`)
+
+Docker 이미지 안의 pyrealsense2는 librealsense v2.55.1을 **RSUSB 백엔드로 소스빌드**한 것이다.
+커널 V4L2/uvcvideo를 우회하고 libusb로 카메라를 직접 제어하므로 XU 컨트롤이 통과되고,
+D405 wedge(스트림 정지)에서 벗어날 여지와 `hardware_reset()`이라는 실질적 복구 수단이 생긴다.
+
+> ★ **이 이미지를 지우면 재빌드에 약 40분이 걸린다.** 사전점검에서 이미지 존재 확인이
+> 가장 중요한 이유다. 롤백용 `1.0-foxy-3cam`(v7)도 함께 보존한다.
+
+### 11.2 머리 카메라가 퍼블리시 클럭이다 (`--camera-triggered`)
+
+카메라 서버는 loop마다 발행하지 않는다. **머리 카메라에 새 프레임이 도착할 때만**
+손목 최신 JPEG 2장을 함께 묶어 5555로 발행한다. exporter도 `--camera-triggered`로
+"카메라 프레임 도착 = 1 데이터 프레임"으로 동작한다.
+
+- 자유 실행 50Hz 루프에서 생기는 **중복 프레임이 사라진다.**
+- 저장 레이트 = 카메라 레이트가 되고, timestamp는 `frame_index / fps`의 균일 그리드로 찍혀
+  `verify_dataset.py`의 시간축 검사를 통과한다.
+
+### 11.3 `--dataset-fps 25`인 이유
+
+`dataset_fps`는 mp4와 `info.json`에 **찍히는** fps다. 실제 발행 레이트가 이 값보다 낮으면
+같은 프레임 수를 더 짧은 시간에 재생하게 되어 **영상이 빠른 배속으로 재생된다.**
+
+머리 카메라 실측이 ≈29Hz이므로, 프레임 드롭이 나도 25Hz 아래로는 잘 안 내려가도록
+안전 마진을 두고 25로 고정했다. 카메라 트리거는 이 값에 맞춰 실시간 그리드로 다운샘플된다.
+
+> **변경 가능하다.** 다만 올릴 때는 반드시 터미널 1의 실측 Hz를 먼저 확인하고,
+> 그보다 확실히 낮은 값으로 잡을 것. 올렸다가 실제 레이트가 못 따라오면 배속 재생이 된다.
