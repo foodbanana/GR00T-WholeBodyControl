@@ -41,7 +41,7 @@ LeRobot v2.1 데이터셋을 수집하는 파이프라인의 운영 문서.
 | 파일 | 역할 |
 |---|---|
 | [docker/README.3cam_pipeline.md](docker/README.3cam_pipeline.md) | 3-cam 파이프라인 설계 배경 — 코드가 왜 이렇게 생겼는지 (병목 해결 내역, 머리 취득 경로 변천) |
-| [docker/Dockerfile.ltw_camera_server_ros2foxy_v8](docker/Dockerfile.ltw_camera_server_ros2foxy_v8) | 카메라 서버 이미지 정의 (librealsense RSUSB 소스빌드, 재빌드 시 ~40분) |
+| [docker/Dockerfile.ltw_camera_server_ros2foxy_v8](docker/Dockerfile.ltw_camera_server_ros2foxy_v8) | 카메라 서버 이미지 정의 (librealsense RSUSB 소스빌드). 빌드 방법은 §10 |
 | [install_scripts/install_data_collection.sh](install_scripts/install_data_collection.sh) | DGX `.venv_data_collection` 생성 |
 | [install_scripts/install_pico.sh](install_scripts/install_pico.sh) | DGX teleop 환경 설치 |
 
@@ -67,26 +67,21 @@ LeRobot v2.1 데이터셋을 수집하는 파이프라인의 운영 문서.
 ping -c 3 192.168.123.164
 ssh unitree@192.168.123.164            # pw: 123
 
-# (네트워크를 바꿔야 할 때만 — 공유 로봇이므로 주의)
-# sudo nmcli device wifi connect "delight" password "shy80@kist"
-
 # --- 이하 Orin에서 ---
 cd ~/tw_gearsonic/GR00T-WholeBodyControl
 git pull
 git log --oneline -1
 
-# 1) 파일시스템 이상 (재부팅 중 전원차단 흔적)
-sudo dmesg | grep -iE "ext4|EXT4|recovery|corrupt" | head
-#    "ordered data mode" / "re-mounted" 만 있으면 정상.
-#    corrupt / error 가 보이면 진행하지 말 것.
-
-# 2) ★가장 중요 — docker 이미지 생존 확인 (없으면 재빌드 40분)
+# 1) ★가장 중요 — docker 이미지 생존 확인
 sudo docker images | grep ltw-camera-server
 #    기대: 1.1-foxy-3cam (v8, 실사용) + 1.0-foxy-3cam (v7, 롤백용)
 
-# 3) repo 정상
+# 2) repo 정상
 git status                             # clean 이어야 함
 ```
+
+> **이미지가 안 보이면 §10의 [이미지 빌드](#이미지-빌드--이미지가-없을-때)로 가서 먼저 빌드해야 한다.**
+> 그 전까지는 이후 단계를 진행할 수 없다.
 
 ---
 
@@ -405,6 +400,64 @@ proprio/pose는 카메라 프레임 도착 시점의 최신값으로 스냅샷�
 
 `docker/` 안에 Dockerfile이 여러 개 있지만, **실제로 사용하는 것은 v8 하나뿐이다.**
 
+### 이미지 빌드 — 이미지가 없을 때
+
+Orin에서 **직접 빌드**한다. Dockerfile이 리포에 들어 있으므로 `git pull`만 되어 있으면 된다.
+
+**① 전제 확인**
+
+```bash
+# Orin에서
+df -h /                  # 여유 공간 — 빌드 트리를 남기므로 5GB 이상 권장
+ping -c 2 github.com     # 인터넷 필요 (베이스 이미지 pull + 소스 clone)
+```
+
+빌드 중 외부에서 받아오는 것: 베이스 이미지 `nvcr.io/nvidia/l4t-jetpack:r35.3.1`,
+CycloneDDS 0.10.2, librealsense v2.55.1, unitree_sdk2_python. **오프라인에서는 빌드할 수 없다.**
+
+**② 빌드**
+
+```bash
+cd ~/tw_gearsonic/GR00T-WholeBodyControl
+sudo docker build -f docker/Dockerfile.ltw_camera_server_ros2foxy_v8 \
+    -t ltw-camera-server:1.1-foxy-3cam \
+    docker/
+```
+
+> ★ **마지막 인자 `docker/` 가 빌드 컨텍스트다.** 리포 루트(`.`)를 주면 Dockerfile의
+> `COPY src/camera_forwarder_3cam.py` 가 경로를 찾지 못해 실패한다.
+
+> ★ **태그를 v7과 다르게 유지할 것.** `1.0-foxy-3cam`(v7)을 덮어쓰면 롤백 자산이 사라진다.
+
+**③ 소요 시간 — 캐시 유무에 따라 크게 다르다**
+
+| 상황 | 대략 | 이유 |
+|---|---|---|
+| v7 이미지/레이어 캐시 있음 | **20~40분** | 섹션 1~5가 v7과 바이트 동일해 캐시 히트. librealsense 소스빌드(섹션 5.5)부터만 다시 돈다 |
+| 새 로봇 / 캐시 없음 | **1~2시간** | 여기에 CycloneDDS 소스빌드(30~60분)가 추가된다 |
+
+**④ 빌드 실패 시**
+
+| 증상 | 조치 |
+|---|---|
+| `c++: fatal error: Killed` | 메모리 부족. Dockerfile의 `RUN make -j"$(nproc)"` 를 `-j4` 로 낮춘다 |
+| `pyrealsense2 본체 .so 를 찾지 못했다` | 섹션 5.6 검증이 잡아낸 것. 그 위 `빌드 트리에 생성된 Python 모듈` 출력을 확인한다 |
+| 디스크 부족 | `sudo docker image prune` 으로 dangling 이미지 정리 후 재시도 |
+
+**⑤ 빌드 후 확인**
+
+```bash
+sudo docker images | grep ltw-camera-server      # 1.1-foxy-3cam 이 보이는가
+sudo ./docker/list_realsense_serials.sh          # 컨테이너가 실제로 뜨고 카메라가 열거되는가
+```
+
+두 번째 명령이 시리얼을 출력하면 **이미지 안의 pyrealsense2가 정상 동작한다는 뜻**이므로
+빌드 검증까지 겸한다.
+
+> 다른 기계에서 빌드해 `docker save` / `scp` / `docker load` 로 옮기는 방법도 있지만, 베이스가
+> Jetson 전용 L4T 이미지라 **같은 aarch64 + L4T 환경에서만** 유효하다. 현재는 Orin 직접 빌드를
+> 표준으로 한다.
+
 ### 실행 경로
 
 ```
@@ -468,12 +521,7 @@ pyrealsense2가 호스트에는 없고 이미지 안에만 있기 때문에 열�
 | [Dockerfile.ltw_camera_server_ros2foxy_v8](docker/Dockerfile.ltw_camera_server_ros2foxy_v8) | `1.1-foxy-3cam` | ✅ **현재 사용.** 머리·손목 모두 librealsense 직결 |
 | [Dockerfile.ltw_camera_server_ros2foxy_v7](docker/Dockerfile.ltw_camera_server_ros2foxy_v7) | `1.0-foxy-3cam` | 🔙 롤백용. 머리를 videohub RPC로 받는 경로. **이미지를 지우지 말 것** |
 
-v8 재빌드가 필요할 때 (~40분):
-
-```bash
-docker build -f docker/Dockerfile.ltw_camera_server_ros2foxy_v8 \
-    -t ltw-camera-server:1.1-foxy-3cam docker/
-```
+빌드 방법은 위 [이미지 빌드](#이미지-빌드--이미지가-없을-때) 참조.
 
 ### `docker/src/` 파일별 역할
 
@@ -495,7 +543,7 @@ Docker 이미지 안의 pyrealsense2는 librealsense v2.55.1을 **RSUSB 백엔�
 커널 V4L2/uvcvideo를 우회하고 libusb로 카메라를 직접 제어하므로 XU 컨트롤이 통과되고,
 D405 wedge(스트림 정지)에서 벗어날 여지와 `hardware_reset()`이라는 실질적 복구 수단이 생긴다.
 
-> ★ **이 이미지를 지우면 재빌드에 약 40분이 걸린다.** 사전점검에서 이미지 존재 확인이
+> ★ **이 이미지를 지우면 재빌드에 20~40분(캐시 없으면 1~2시간)이 걸린다.** 사전점검에서 이미지 존재 확인이
 > 가장 중요한 이유다. 롤백용 `1.0-foxy-3cam`(v7)도 함께 보존한다.
 
 ### 11.2 머리 카메라가 퍼블리시 클럭이다 (`--camera-triggered`)
