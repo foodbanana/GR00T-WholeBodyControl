@@ -459,13 +459,11 @@ ENV CYCLONEDDS_URI=file:///etc/cyclonedds.xml
 # -----------------------------------------------------------------------------
 # 7. App
 # -----------------------------------------------------------------------------
-# camera_forwarder.py(머리 전용, v5 CMD가 쓰던 것)도 함께 넣어둔다 — 손목
-# 문제를 배제하고 머리만 A/B로 확인할 때 이미지 교체 없이 CMD만 바꾸면 된다.
 # ※ forwarder는 v7과 같은 파일을 COPY 한다(복제본 없음). run 스크립트가
 #   bind-mount로 호스트 최신본을 덮어쓰므로 실제 실행되는 것도 같은 파일이다.
+# ※ 머리만 A/B로 확인하려면 --no-wrists (run 스크립트의 NO_WRISTS=1)를 쓴다.
 WORKDIR /app
 COPY src/camera_forwarder_3cam.py /app/camera_forwarder_3cam.py
-COPY src/camera_forwarder.py /app/camera_forwarder.py
 COPY config/cyclonedds.xml /etc/cyclonedds.xml
 
 # -----------------------------------------------------------------------------

@@ -13,7 +13,7 @@
 #
 # [언제 실행하나]
 #   power/control 값은 재부팅/USB 재연결 시 기본값(auto)으로 돌아가므로,
-#   **3-cam 서버(run_ltw_camera_server_ros2foxy_v6.sh)를 띄우기 전에 매번** 실행.
+#   **3-cam 서버(run_ltw_camera_server_ros2foxy_v8.sh)를 띄우기 전에 매번** 실행.
 #   포트 경로가 바뀌어도 되도록 idProduct 매칭으로 모든 D405에 적용한다.
 #
 # [공유 로봇 주의]
