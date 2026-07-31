@@ -959,7 +959,56 @@ def main():
     parser.add_argument("--wrist-ready-timeout", type=float, default=60.0)
     parser.add_argument("--list-devices", action="store_true",
                         help="D405 color 노드 자동 탐지 결과 출력 후 종료")
+    parser.add_argument("--list-serials", action="store_true",
+                        help="명령어에 그대로 넣을 librealsense 시리얼만 간결히 "
+                             "출력 후 종료 (--list-devices 의 축약판)")
     args = parser.parse_args()
+
+    # ---- list-serials 모드 (간결) ------------------------------------------
+    # --list-devices 는 by-id 노드까지 다 찍어 로그가 길다. 실제로 명령어에
+    # 넣는 값은 librealsense 시리얼뿐이므로 그것만 붙여넣기 좋은 형태로 낸다.
+    if args.list_serials:
+        try:
+            import pyrealsense2 as rs
+        except Exception as e:
+            print(f"librealsense import 실패: {type(e).__name__}: {e}", flush=True)
+            sys.exit(1)
+        devs = _rs_devices(rs)
+        if not devs:
+            print("librealsense 장치를 찾지 못했습니다. USB 연결을 확인하세요.",
+                  flush=True)
+            sys.exit(1)
+
+        heads = [(n, s) for n, s in devs if "405" not in n]
+        # 서버의 자동배정과 같은 규칙(시리얼 오름차순: 첫째=left, 둘째=right).
+        wrists = sorted((s, n) for n, s in devs if "405" in n)
+
+        lines = []
+        for name, serial in heads:
+            lines.append((f"HEAD_SERIAL={serial}", name))
+        for i, (serial, name) in enumerate(wrists):
+            key = ("LEFT_WRIST_SERIAL" if i == 0 else
+                   "RIGHT_WRIST_SERIAL" if i == 1 else "EXTRA_D405")
+            lines.append((f"{key}={serial}", name))
+        width = max(len(a) for a, _ in lines)
+        for assign, name in lines:
+            print(f"{assign.ljust(width)}   # {name}", flush=True)
+
+        if len(heads) == 1:
+            print("\n# 복사해서 실행 (손목 좌/우가 맞으면 손목 시리얼은 생략 가능)")
+            print(f"WRIST_BACKEND=realsense HEAD_SERIAL={heads[0][1]} \\")
+            print("  sudo -E ./docker/run_ltw_camera_server_ros2foxy_v8.sh",
+                  flush=True)
+        elif len(heads) > 1:
+            print("\n# 머리 후보가 2대 이상이다. 어느 것이 머리인지 확인하고 "
+                  "HEAD_SERIAL 을 직접 고를 것.", flush=True)
+        else:
+            print("\n# 머리 카메라(D405가 아닌 장치)가 안 보인다. 연결을 확인할 것.",
+                  flush=True)
+        if len(wrists) < 2:
+            print(f"# 주의: D405 가 {len(wrists)}대만 보인다 (3-cam 수집은 2대 필요).",
+                  flush=True)
+        sys.exit(0)
 
     # ---- list-devices 모드 -------------------------------------------------
     if args.list_devices:

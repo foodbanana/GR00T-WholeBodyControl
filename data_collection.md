@@ -133,9 +133,26 @@ cd ~/tw_gearsonic/GR00T-WholeBodyControl
 sudo ./docker/list_realsense_serials.sh
 ```
 
-이 스크립트는 컨테이너 안에서 `camera_forwarder_3cam.py --list-devices`를 실행한다
+출력 — 명령어에 넣을 값만 나온다:
+
+```
+HEAD_SERIAL=046322250434          # Intel RealSense D455
+LEFT_WRIST_SERIAL=260322270228    # Intel RealSense D405
+RIGHT_WRIST_SERIAL=260422272337   # Intel RealSense D405
+
+# 복사해서 실행 (손목 좌/우가 맞으면 손목 시리얼은 생략 가능)
+WRIST_BACKEND=realsense HEAD_SERIAL=046322250434 \
+  sudo -E ./docker/run_ltw_camera_server_ros2foxy_v8.sh
+```
+
+마지막 두 줄을 그대로 복사해 터미널 1에서 실행하면 된다.
+
+이 스크립트는 컨테이너 안에서 `camera_forwarder_3cam.py --list-serials`를 실행한다
 (pyrealsense2가 호스트에는 없고 이미지 안에만 있기 때문). 스트림을 시작하지 않는
 단순 열거이므로 서버를 띄우기 전에 안전하게 돌릴 수 있다.
+
+> D405의 by-id color 노드(`--left-node` / `--right-node` 용)까지 봐야 하면
+> `sudo ./docker/list_realsense_serials.sh -v` 로 실행한다.
 
 
 | 종류 | 출처 | 예시 | 용도 |
