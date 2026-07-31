@@ -130,37 +130,19 @@
   <text x="245" y="583" font-size="10" fill="#777">폴링 루프 50Hz — 수신은 매 루프, 저장은 게이트 통과 시에만</text>
 
   <!-- ===== 수신 단 (포트별로 정책이 다르다) ===== -->
-  <rect x="232" y="590" width="140" height="46" fill="#fff" stroke="#555" stroke-width="1.2" rx="3"/>
-  <text x="302" y="608" text-anchor="middle" font-size="11.5" fill="#111">image (5555)</text>
-  <text x="302" y="625" text-anchor="middle" font-size="9.5" fill="#777">CONFLATE — 큐 없음</text>
+  <rect x="232" y="596" width="140" height="40" fill="#fff" stroke="#555" stroke-width="1.2" rx="3"/>
+  <text x="302" y="621" text-anchor="middle" font-size="11.5" fill="#111">image (5555)</text>
 
-  <rect x="665" y="590" width="140" height="46" fill="#fff" stroke="#555" stroke-width="1.2" rx="3"/>
-  <text x="735" y="608" text-anchor="middle" font-size="11.5" fill="#111">proprio (5557)</text>
-  <text x="735" y="625" text-anchor="middle" font-size="9.5" fill="#777">CONFLATE — 큐 없음</text>
+  <rect x="665" y="596" width="140" height="40" fill="#fff" stroke="#555" stroke-width="1.2" rx="3"/>
+  <text x="735" y="621" text-anchor="middle" font-size="11.5" fill="#111">proprio (5557)</text>
 
   <rect x="890" y="590" width="190" height="46" fill="#fff" stroke="#c0392b" stroke-width="1.4" rx="3"/>
   <text x="985" y="608" text-anchor="middle" font-size="11.5" fill="#111">teleop (5556)</text>
-  <text x="985" y="625" text-anchor="middle" font-size="9.5" fill="#c0392b">수신 큐 20칸 → 매 루프 드레인</text>
+  <text x="985" y="625" text-anchor="middle" font-size="9.5" fill="#c0392b">수신 큐 20칸 — 버튼 이벤트 보존</text>
 
-  <line x1="302" y1="636" x2="302" y2="653" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
-  <line x1="735" y1="636" x2="735" y2="653" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
-  <line x1="985" y1="636" x2="985" y2="653" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
-
-  <!-- ===== 최신 슬롯 / 토픽 분해 ===== -->
-  <rect x="232" y="656" width="140" height="44" fill="#fff" stroke="#555" stroke-width="1.2" rx="3"/>
-  <text x="302" y="683" text-anchor="middle" font-size="11" fill="#111">최신 1칸</text>
-
-  <rect x="665" y="656" width="140" height="44" fill="#fff" stroke="#555" stroke-width="1.2" rx="3"/>
-  <text x="735" y="683" text-anchor="middle" font-size="11" fill="#111">최신 1칸</text>
-
-  <rect x="890" y="656" width="190" height="21" fill="#fff" stroke="#555" stroke-width="1.2" rx="2"/>
-  <text x="985" y="671" text-anchor="middle" font-size="10" fill="#111">pose / planner — 최신 1칸</text>
-  <rect x="890" y="679" width="190" height="21" fill="#fff" stroke="#555" stroke-width="1.2" rx="2"/>
-  <text x="985" y="694" text-anchor="middle" font-size="10" fill="#111">버튼 토글 플래그 (에피소드 제어)</text>
-
-  <line x1="302" y1="700" x2="302" y2="717" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
-  <line x1="735" y1="700" x2="735" y2="717" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
-  <line x1="985" y1="700" x2="985" y2="717" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+  <line x1="302" y1="636" x2="302" y2="717" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+  <line x1="735" y1="636" x2="735" y2="717" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
+  <line x1="985" y1="636" x2="985" y2="717" stroke="#333" stroke-width="1.6" marker-end="url(#arw)"/>
 
   <!-- ===== 저장 게이트 + 프레임 조립 ===== -->
   <rect x="265" y="720" width="830" height="54" fill="#fff" stroke="#333" stroke-width="1.3" rx="3"/>
