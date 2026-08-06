@@ -219,3 +219,10 @@ models/
 # Downloaded from HuggingFace (hf download)
 sample_data/
 sonic_release/
+
+# 평가 산출물 — 플롯/디코드 결과는 스크립트로 재생성 가능하다(decoded.npz + preds).
+# 분석 문서(.md)와 지표(.csv)만 추적한다.
+eval_results/**/*.png
+eval_results/**/*.jpeg
+eval_results/**/*.npz
+eval_results/**/*.mp4

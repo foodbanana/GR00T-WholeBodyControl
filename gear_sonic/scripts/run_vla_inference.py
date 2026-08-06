@@ -120,6 +120,22 @@ class InferenceConfig:
     blends from its current motion token to the initial pose token over this
     period. Set to 0 to snap instantly (no blend)."""
 
+    # Chunk transition
+    chunk_blend_frames: int = 0
+    """Frames to cross-fade the motion token when switching to a freshly
+    inferred action chunk. 0 (default) keeps the previous behaviour.
+
+    Without blending the first token of a new chunk is published raw and the
+    commanded joint target jumps: measured on val5 (decoded to joint space),
+    chunk boundaries moved the right arm by 20 deg on average versus 4.8 deg
+    on ordinary frames -- 4.2x -- with outliers past 200 deg. Fading over a few
+    frames keeps the WBC decoder from being handed a step input.
+
+    Defaults to OFF because this is **not yet validated on hardware**: in the
+    MuJoCo closed-loop check, 3 frames of blending raised peak torso tilt from
+    18.2 to 26.9 deg. It did not fall over, but the trade-off is real. Pass
+    `--chunk-blend-frames 3` explicitly to try it, and watch the posture."""
+
     # Debug
     verbose_timing: bool = False
     """Whether to always print timing info (not just when loop is slow)."""
@@ -523,6 +539,10 @@ def main(config: InferenceConfig):
 
     zmq_frame_counter = 0
     last_sent_motion_token: np.ndarray | None = None
+    # Chunk cross-fade state: `blend_from` is the token published just before a
+    # new chunk arrived; `blend_step` counts how far into the fade we are.
+    blend_from: np.ndarray | None = None
+    blend_step: int = 0
 
     PROMPT_MSG_PREFIX = "prompt:"
 
@@ -650,6 +670,11 @@ def main(config: InferenceConfig):
                 )
                 cached_action_chunk = processed_action
                 last_inference_time = time.monotonic()
+                # Cross-fade into the new chunk from whatever we last published,
+                # so the decoder never sees a step change at the seam.
+                if config.chunk_blend_frames > 0 and last_sent_motion_token is not None:
+                    blend_from = last_sent_motion_token.copy()
+                    blend_step = 0
                 print_green(
                     f'New action chunk (prompt: "{language_prompt_ref[0]}", '
                     f"latency: {inference_delay:.3f}s)"
@@ -719,6 +744,18 @@ def main(config: InferenceConfig):
                         left_hand_joints = left_hand_joints[current_idx]
                     if right_hand_joints.ndim == 2:
                         right_hand_joints = right_hand_joints[current_idx]
+
+                    # Cross-fade the first `chunk_blend_frames` publishes after a
+                    # new chunk arrives. Hand joints are not blended: they are
+                    # direct joint commands and already continuous.
+                    if blend_from is not None and blend_step < config.chunk_blend_frames:
+                        blend_step += 1
+                        alpha = blend_step / config.chunk_blend_frames
+                        motion_token = (
+                            (1.0 - alpha) * blend_from + alpha * motion_token
+                        ).astype(np.float32)
+                        if blend_step >= config.chunk_blend_frames:
+                            blend_from = None
 
                     frame_index = np.array([zmq_frame_counter], dtype=np.int64)
                     zmq_frame_counter += 1

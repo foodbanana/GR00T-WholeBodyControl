@@ -403,8 +403,16 @@ def write_output_dataset(
 
         total_frames += ep_len
 
-    info["total_episodes"] = len(all_episodes)
+    n_ep = len(all_episodes)
+    info["total_episodes"] = n_ep
     info["total_frames"] = total_frames
+    # ★ total_videos/splits/total_chunks 도 갱신해야 한다 — 예전엔 total_episodes/
+    #   total_frames 만 덮어쓰고 나머지는 reference(첫 소스) info 값을 그대로 남겨,
+    #   병합본 splits 가 "0:<첫 소스 에피소드수>" 로 남아 로더가 뒤쪽 에피소드를
+    #   통째로 버릴 수 있었다(예: 55개 병합인데 splits "0:5" → 5개만 학습).
+    info["total_videos"] = n_ep * len(get_video_keys(info))
+    info["total_chunks"] = (n_ep + chunks_size - 1) // chunks_size
+    info["splits"] = {"train": f"0:{n_ep}"}
     info.pop("discarded_episode_indices", None)
 
     with open(meta_dir / "info.json", "w", encoding="utf-8") as f:

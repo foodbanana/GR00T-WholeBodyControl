@@ -1,0 +1,24 @@
+[
+ {
+  "checkpoint": 4000,
+  "traj": 0,
+  "episode": "ep49 NEG",
+  "fell": false,
+  "min_height": 0.7061664460286654,
+  "max_tilt": 17.78581431457383,
+  "limit_hits": 0,
+  "torque_sat": 0.0017471264367816095,
+  "arm_range": 32.064590801563284
+ },
+ {
+  "checkpoint": 4000,
+  "traj": 1,
+  "episode": "ep50 POS",
+  "fell": false,
+  "min_height": 0.7061717514066924,
+  "max_tilt": 17.249625199530414,
+  "limit_hits": 0,
+  "torque_sat": 0.00202170488359881,
+  "arm_range": 163.12125500245602
+ }
+]
