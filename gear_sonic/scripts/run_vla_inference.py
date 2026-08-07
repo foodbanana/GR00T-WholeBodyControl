@@ -28,6 +28,7 @@ import queue
 import threading
 import time
 
+import cv2
 import numpy as np
 import tyro
 import zmq
@@ -84,6 +85,27 @@ class InferenceConfig:
 
     camera_port: int = 5555
     """Camera server port."""
+
+    camera_decode_reduce: int = 2
+    """Decode ego_view JPEGs at 1/N resolution via libjpeg scaled decode
+    (1=full, 2=half, 4=quarter). 2 gives 960x540, still above the 640x480
+    target, so the downscale below is lossless in practice. Wrist cameras are
+    already 640x480 and are left at full decode. Mirrors the data exporter's
+    `--camera-decode-reduce`."""
+
+    camera_image_size: str = "640x480"
+    """Resize frames to WxH before sending them to the PolicyServer, matching
+    the resolution the dataset was recorded at.
+
+    This is not cosmetic. The observation crosses the wire as a raw uint8 array,
+    so resolution sets both the payload and the round-trip time. Measured
+    against the GPU server over the SSH tunnel: 1920x1080 is 6.2 MB and 647 ms,
+    960x540 is 1.6 MB and 243 ms, 640x480 is 0.9 MB and 192 ms. At the 2.5 Hz
+    inference rate the budget is 400 ms, so sending full-res frames misses it by
+    itself. 640x480 also reproduces the training preprocessing exactly.
+
+    Set to an empty string to send frames at whatever resolution the camera
+    server publishes."""
 
     # ZMQ: Robot state (from C++ zmq_output_handler, g1_debug topic)
     state_zmq_host: str = "localhost"
@@ -225,12 +247,28 @@ def get_action_field(action_dict: dict, key: str):
 # ---------------------------------------------------------------------------
 
 
+def _resize_frame(image: np.ndarray, image_size: tuple[int, int] | None) -> np.ndarray:
+    """Downscale a camera frame to ``(width, height)``, as the exporter does.
+
+    INTER_AREA and the already-reduced decode match the data exporter's path
+    (1080p -> reduced decode -> 640x480), so what the policy sees at inference
+    time is preprocessed the same way as what it was trained on.
+    """
+    if image_size is None:
+        return image
+    width, height = image_size
+    if image.shape[1] == width and image.shape[0] == height:
+        return image
+    return cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
+
+
 def prepare_observation_from_sensors(
     camera_subscriber,
     state_subscriber,
     robot_model,
     language_prompt: str,
     log_errors: bool = False,
+    image_size: tuple[int, int] | None = None,
 ):
     """Read sensors and prepare observation for the VLA policy.
 
@@ -249,7 +287,7 @@ def prepare_observation_from_sensors(
             print("[DEBUG] prepare_observation: waiting for state msg..", flush=True)
         return None
 
-    cam_img = camera_msg["images"]["ego_view"]
+    cam_img = _resize_frame(camera_msg["images"]["ego_view"], image_size)
 
     # Copy index finger data to middle finger (hardware coupling)
     state_msg["left_hand_q"][5] = state_msg["left_hand_q"][3]
@@ -263,9 +301,11 @@ def prepare_observation_from_sensors(
 
     video = {"ego_view": cam_img[np.newaxis, np.newaxis]}
     if "left_wrist" in camera_msg["images"]:
-        video["left_wrist"] = camera_msg["images"]["left_wrist"][np.newaxis, np.newaxis]
+        left_wrist = _resize_frame(camera_msg["images"]["left_wrist"], image_size)
+        video["left_wrist"] = left_wrist[np.newaxis, np.newaxis]
     if "right_wrist" in camera_msg["images"]:
-        video["wrist_view"] = camera_msg["images"]["right_wrist"][np.newaxis, np.newaxis]
+        right_wrist = _resize_frame(camera_msg["images"]["right_wrist"], image_size)
+        video["wrist_view"] = right_wrist[np.newaxis, np.newaxis]
 
     observation = {
         "video": video,
@@ -378,8 +418,25 @@ def _compute_closed_hand_joints(side: str) -> np.ndarray:
     return solver._get_middle_close_q_desired().astype(np.float32)
 
 
+def _parse_image_size(spec: str) -> tuple[int, int] | None:
+    """Parse a ``WxH`` string into ``(width, height)``; empty string disables."""
+    if not spec:
+        return None
+    try:
+        width, height = (int(v) for v in spec.lower().split("x"))
+    except ValueError as exc:
+        raise ValueError(
+            f"--camera-image-size must look like '640x480', got {spec!r}"
+        ) from exc
+    if width <= 0 or height <= 0:
+        raise ValueError(f"--camera-image-size must be positive, got {spec!r}")
+    return width, height
+
+
 def main(config: InferenceConfig):
     pause_loop = True
+
+    image_size = _parse_image_size(config.camera_image_size)
 
     robot_model = instantiate_g1_robot_model(waist_location="lower_and_upper_body")
 
@@ -400,8 +457,16 @@ def main(config: InferenceConfig):
     )
 
     camera_subscriber = ComposedCameraClientSensor(
-        server_ip=config.camera_host, port=config.camera_port
+        server_ip=config.camera_host,
+        port=config.camera_port,
+        # Per-camera: only ego_view (1080p) gains from a reduced decode. Wrist
+        # cameras are already 640x480 and reducing them would blur on upscale.
+        decode_reduce_factor={"ego_view": config.camera_decode_reduce},
     )
+    if image_size is not None:
+        print_green(f"Sending {image_size[0]}x{image_size[1]} frames to the PolicyServer")
+    else:
+        print("Camera resize disabled — sending frames at the publisher's resolution.")
 
     zmq_context = zmq.Context()
     zmq_socket = zmq_context.socket(zmq.PUB)
@@ -645,6 +710,7 @@ def main(config: InferenceConfig):
                 robot_model=robot_model,
                 language_prompt=language_prompt_ref[0],
                 log_errors=True,
+                image_size=image_size,
             ),
             lambda obs: run_policy_inference_and_process(
                 policy=n1_policy,

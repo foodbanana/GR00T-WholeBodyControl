@@ -139,6 +139,14 @@ class InferenceLaunchConfig:
     camera_port: int = 5555
     """Camera server port."""
 
+    camera_decode_reduce: int = 2
+    """Decode ego_view JPEGs at 1/N resolution (1=full, 2=half, 4=quarter)."""
+
+    camera_image_size: str = "640x480"
+    """Resize frames to WxH before sending to the PolicyServer. Matches the
+    dataset's recording resolution and keeps the round trip inside the 2.5 Hz
+    budget — see run_vla_inference.py for the measured numbers. Empty disables."""
+
     # Data exporter (optional recording during inference)
     data_exporter: bool = True
     """Start the data exporter pane for recording during inference."""
@@ -269,6 +277,11 @@ def main(config: InferenceLaunchConfig):
     print(f"  Action rate:     {config.action_publish_rate} Hz")
     print(f"  Action horizon:  {config.action_horizon}")
     print(f"  Camera:          {config.camera_host}:{config.camera_port}")
+    print(
+        f"    Sent to policy: "
+        f"{config.camera_image_size or 'publisher resolution'} "
+        f"(decode 1/{config.camera_decode_reduce})"
+    )
     print(f"  Data exporter:   {'Yes' if config.data_exporter else 'No'}")
     if config.data_exporter:
         print(f"    DC frequency:  {config.data_exporter_frequency} Hz")
@@ -384,7 +397,9 @@ def main(config: InferenceLaunchConfig):
         f"--action-publish-rate {config.action_publish_rate} "
         f"--action-horizon {config.action_horizon} "
         f"--camera-host {config.camera_host} "
-        f"--camera-port {config.camera_port}"
+        f"--camera-port {config.camera_port} "
+        f"--camera-decode-reduce {config.camera_decode_reduce} "
+        f"--camera-image-size '{config.camera_image_size}'"
     )
 
     print("Starting VLA inference (pane 1)...")
