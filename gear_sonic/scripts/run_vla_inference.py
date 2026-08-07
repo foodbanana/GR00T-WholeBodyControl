@@ -86,23 +86,32 @@ class InferenceConfig:
     camera_port: int = 5555
     """Camera server port."""
 
-    camera_decode_reduce: int = 2
+    camera_decode_reduce: int = 1
     """Decode ego_view JPEGs at 1/N resolution via libjpeg scaled decode
-    (1=full, 2=half, 4=quarter). 2 gives 960x540, still above the 640x480
-    target, so the downscale below is lossless in practice. Wrist cameras are
-    already 640x480 and are left at full decode. Mirrors the data exporter's
-    `--camera-decode-reduce`."""
+    (1=full, 2=half, 4=quarter).
+
+    Defaults to 1 because this robot's head camera publishes ego_view at
+    640x480 natively -- measured against the running camera server: reduce 1
+    gives (480, 640, 3) at 29 fps, reduce 2 gives (240, 320, 3). Reducing here
+    would halve the frame and `--camera-image-size` would then upscale the blur
+    back to 640x480, which is not what the policy was trained on: the v2
+    collection logs show ego_view reaching the exporter at (480, 640) with a
+    (480, 640) target, i.e. recorded with no resize at all.
+
+    Raise it to 2 only for a 1080p ego_view (the OAK setup the exporter's own
+    default assumes), where halving still lands above the 640x480 target."""
 
     camera_image_size: str = "640x480"
     """Resize frames to WxH before sending them to the PolicyServer, matching
     the resolution the dataset was recorded at.
 
-    This is not cosmetic. The observation crosses the wire as a raw uint8 array,
-    so resolution sets both the payload and the round-trip time. Measured
-    against the GPU server over the SSH tunnel: 1920x1080 is 6.2 MB and 647 ms,
-    960x540 is 1.6 MB and 243 ms, 640x480 is 0.9 MB and 192 ms. At the 2.5 Hz
-    inference rate the budget is 400 ms, so sending full-res frames misses it by
-    itself. 640x480 also reproduces the training preprocessing exactly.
+    A no-op for the current head camera, which already publishes 640x480 -- it
+    is the guard for a higher-resolution one. The observation crosses the wire
+    as a raw uint8 array, so resolution sets both the payload and the
+    round-trip time. Measured against the GPU server over the SSH tunnel:
+    1920x1080 is 6.2 MB and 647 ms, 960x540 is 1.6 MB and 243 ms, 640x480 is
+    0.9 MB and 192 ms. At the 2.5 Hz inference rate the budget is 400 ms, so a
+    1080p ego_view would miss it on payload alone.
 
     Set to an empty string to send frames at whatever resolution the camera
     server publishes."""

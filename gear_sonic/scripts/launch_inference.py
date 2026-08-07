@@ -139,8 +139,10 @@ class InferenceLaunchConfig:
     camera_port: int = 5555
     """Camera server port."""
 
-    camera_decode_reduce: int = 2
-    """Decode ego_view JPEGs at 1/N resolution (1=full, 2=half, 4=quarter)."""
+    camera_decode_reduce: int = 1
+    """Decode ego_view JPEGs at 1/N resolution (1=full, 2=half, 4=quarter).
+    1 for this robot's 640x480 head camera — reducing would halve it and the
+    resize below would upscale the blur back. Raise to 2 for a 1080p ego_view."""
 
     camera_image_size: str = "640x480"
     """Resize frames to WxH before sending to the PolicyServer. Matches the
