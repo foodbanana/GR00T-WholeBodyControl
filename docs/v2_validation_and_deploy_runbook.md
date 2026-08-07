@@ -6,6 +6,11 @@
 위에서부터 그대로 복붙하면 된다.
 평가 방법론은 [`open_loop_eval_decoded_joint.md`](open_loop_eval_decoded_joint.md) 참조.
 
+> **실기를 그냥 돌리려는 것이라면** [`vla_run_procedure.md`](vla_run_procedure.md)
+> 를 봐라. 터미널 6개를 띄우고 키를 누르는 순서만 있는 짧은 문서이고,
+> 2026-08-07 첫 구동에서 확정된 설정(ck18000 + `--chunk-blend-frames 2`)이
+> 반영돼 있다. 이 문서는 그 설정에 이르기까지의 검증 과정이다.
+
 ## 무엇이 v1과 다른가
 
 | | v1 | **v2** |
@@ -510,8 +515,13 @@ source .venv_inference/bin/activate
 python gear_sonic/scripts/keyboard_publisher.py
 ```
 
-C++ deploy 와 `run_vla_inference.py` 가 **둘 다 이 포트(5580)를 구독**한다.
-여기에 키를 입력하면 양쪽이 동시에 반응한다.
+**`--input-type zmq_manager` 에서는 `run_vla_inference.py` 만 이 포트를 구독한다.**
+C++ deploy 는 5556 만 듣는다 — `k` 는 추론 클라이언트가 받아서 5556 의 start
+명령으로 번역해 보낸다(C++ 소스에 5580 은 등장하지 않는다, 2026-08-07 확인).
+
+따라서 **T6(VLA 추론)가 뜨기 전에 누른 키는 그냥 버려진다.** ZMQ PUB 는 저장하지
+않으므로 구독자가 없으면 사라진다. 안전하지만 로봇이 반응을 안 해 고장난 줄 알기
+쉽다.
 
 | 키 | 동작 |
 |---|---|
@@ -539,7 +549,7 @@ python gear_sonic/scripts/run_vla_inference.py \
 | 인자 | 공식 기본값 | **우리 값** | 이유 |
 |---|---|---|---|
 | `--action-publish-rate` | 50 | **25** | 모델이 **25fps** 데이터로 학습됐다. `delta_indices=range(40)` 이 데이터셋 프레임 40개 연속이라 리샘플링이 없어, 50이면 **동작이 2배 속도로 재생**된다 |
-| `--chunk-blend-frames` | (없음) | **첫 구동 0 → 이후 3** | 우리가 추가한 옵션. chunk 경계에서 관절목표가 평균 20°(최대 204°) 튀는 것을 완화하지만 **하드웨어 미검증**이다. 검증된 동작(`0`)으로 기준을 먼저 잡고, 경계 점프가 실제로 보이면 `3` 으로 올린다 |
+| `--chunk-blend-frames` | (없음) | **2** | 우리가 추가한 옵션. 2026-08-07 실기 확정값 — `0` 은 팔 내릴 때 튀고, `3` 은 ck2000 에서 **과제를 죽였다**(팔이 안 올라감). `1` 은 alpha=1.0 이라 무효. [실기 절차 문서](vla_run_procedure.md#2026-08-07-실기-결과) 참조 |
 | `--prompt` | `demo` | 학습과 **동일 문장** | 다르면 모델이 이미지 대신 프롬프트로 판별할 여지가 생긴다 |
 | `--camera-image-size` | `640x480` | 기본값 그대로 | 8-1 참조. 원본 1080p 를 보내면 왕복이 647ms 로 2.5Hz 예산(400ms)을 넘고, 학습 때와 다른 리샘플링을 거친다. **원격 PolicyServer 에서는 특히 건드리지 말 것** |
 | `--camera-decode-reduce` | `2` | 기본값 그대로 | 1080p 를 libjpeg 축소 디코드로 960x540 까지 싸게 내린다. 데이터 수집 때와 같은 경로 |
@@ -619,8 +629,9 @@ New action chunk (prompt: "...", latency: 0.132s)
 - **첫 시도는 음성 조건(바나나 없음)으로 한다.** 정답이 "가만히 있기"라
   모델이 크게 움직이면 그 자체가 이상 신호다. 양성 조건은 그다음.
 - `--initial-pose-blend-duration 1.0` (기본) 유지. `0` 은 초기 자세로 순간 이동해 위험하다.
-- `--chunk-blend-frames` 는 **하드웨어 미검증**이다. 첫 구동은 `0`(꺼짐)으로 시작해
-  기준 동작을 본 뒤, 경계 점프가 실제로 보이면 그때 `3` 으로 올린다.
+- `--chunk-blend-frames` 는 2026-08-07 에 하드웨어 검증됐다. **`2` 를 쓴다.**
+  `3` 은 ck2000 에서 과제를 죽였으므로(팔이 안 올라감) 올릴 때는 반드시
+  양성 조건까지 확인할 것.
 
 ### 초기 자세 토큰 — 데모 시작 자세와 다르다 (알고 가는 것)
 
@@ -655,7 +666,7 @@ New action chunk (prompt: "...", latency: 0.132s)
 
 | 항목 | 상태 | 언제 |
 |---|---|---|
-| chunk 전환 블렌딩 | 코드에 구현됨(`--chunk-blend-frames 3`), **평가에는 미반영** | 실기에서 프레임 수 확정 후 |
+| chunk 전환 블렌딩 | ✅ **실기 확정 — `--chunk-blend-frames 2`** (2026-08-07). 오프라인 평가에는 여전히 미반영 | 필요해지면 |
 | 추론 지연 보상 | 미반영 | 실기 첫 구동 시 `latency: ...s` 실측 후 |
 | 바나나 판별 최종 검증 | 불가 | **실기에서만** — 시뮬 렌더링은 실사와 시각 격차가 커서 무의미 |
 
@@ -679,7 +690,7 @@ ssh -N -L 5551:localhost:5550 kist-5090
 python gear_sonic/scripts/run_vla_inference.py \
     --host localhost --port 5551 \  # ★ 원격 PolicyServer 로 가는 터널
     --action-publish-rate 25 \      # ★ 기본값 50이면 동작이 2배 빨라진다
-    --chunk-blend-frames 0 \        # 첫 구동은 검증된 0. 경계 점프 보이면 3
+    --chunk-blend-frames 2 \        # ★ 실기 확정값. 0=튐, 3=과제 죽음, 1=무효
     --camera-image-size 640x480 \   # ★ 원본 1080p 면 왕복 647ms 로 예산 초과
     ...
 ```
