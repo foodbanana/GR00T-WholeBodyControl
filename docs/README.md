@@ -47,6 +47,7 @@
 | 어느 체크포인트를 쓸지 모르겠다 | [4_evaluation.md §8](4_evaluation.md#8-v2-결과--읽고-넘어가야-할-세-가지) — **val/loss 로 고르면 안 된다** |
 | 그래프를 다시 뽑아야 한다 | [4_evaluation.md §5](4_evaluation.md#5-step-4--3곡선-플롯-) — 먼저 [§1-1 onnxenv](4_evaluation.md#1-1-로컬-venv-onnxenv) 재생성 |
 | 무엇이 검증됐고 무엇이 안 됐나 | [5_deploy.md §9 알려진 한계](5_deploy.md#9-알려진-한계--여기까지가-검증된-범위다) |
+| **다른 머신에 올린다 / 백업한다** | [§백업](#백업--다른-머신에-올릴-때) — 레포는 **두 개**이고, 꼭 지켜야 할 것은 데이터셋 169MB 다 |
 
 ## 인계받는 사람이 먼저 알아야 할 일곱 가지
 
@@ -77,6 +78,111 @@
 
 검증된 범위의 경계는 [5_deploy.md §9](5_deploy.md#9-알려진-한계--여기까지가-검증된-범위다) 에 있다.
 로봇은 현재 전원 off 이고, 그 외 실기 자산(바이너리·venv·터널·체크포인트 48개)은 전부 살아 있다.
+
+## 백업 / 다른 머신에 올릴 때
+
+### 레포는 두 개다 — `Isaac-GR00T` 를 빠뜨리기 쉽다
+
+| 레포 | 브랜치 | 없으면 |
+|---|---|---|
+| `foodbanana/GR00T-WholeBodyControl` | **`3cam-pipeline`** | 수집·평가·추론 스크립트 전부 없음 |
+| **`foodbanana/Isaac-GR00T`** | `main` | **`run_vla_inference.py` 가 import 부터 실패** |
+
+`gear_sonic[inference]` 가 `gr00t` 를 **editable 로** 물고 있어, 추론 클라이언트가 쓰는
+`gr00t` 는 별도 폴더에서 온다:
+
+```bash
+$ .venv_inference/bin/python -c "import gr00t, gear_sonic; print(gr00t.__file__); print(gear_sonic.__file__)"
+/home/edgexpert00/Isaac-GR00T/gr00t/__init__.py
+/home/edgexpert00/GR00T-WholeBodyControl/gear_sonic/__init__.py
+```
+
+```bash
+git clone -b 3cam-pipeline https://github.com/foodbanana/GR00T-WholeBodyControl.git
+git clone https://github.com/foodbanana/Isaac-GR00T.git
+```
+
+**NVIDIA 원본이 아니라 이 포크여야 한다** — 원본에는 `PolicyClient` 소켓 누수 수정
+(`a9c944a`)이 없다([5_deploy.md §1](5_deploy.md#-isaac-gr00t-에-소켓-수정이-들어-있어야-한다)).
+
+### 역할별로 필요한 것
+
+| 역할 | WholeBodyControl | Isaac-GR00T | 그 외 |
+|---|---|---|---|
+| PolicyServer 만 (GPU 서버) | 불필요 | **필요** | 체크포인트 |
+| VLA 추론 + C++ deploy (DGX) | 필요 | **필요** | ONNX 다운로드 + C++ 빌드 + venv |
+| 카메라 서버 (로봇 온보드) | 필요 | 불필요 | `.venv_camera` |
+| **코드 백업만** | 필요 | 필요 | 아래 "git 밖" 표 참조 |
+
+### venv 는 복사하면 안 된다 — 새로 만든다
+
+`.pth` 에 **절대경로가 박혀 있어** 사용자명·경로가 다르면 깨진다. `.venv_inference` 만
+**13GB** 다.
+
+```bash
+$ cat .venv_inference/lib/python3.12/site-packages/__editable__.gear_sonic-0.1.0.pth
+/home/edgexpert00/GR00T-WholeBodyControl
+```
+
+```bash
+bash install_scripts/install_inference.sh
+```
+
+> ⚠️ 이 스크립트는 **멱등하지 않다.** `rm -rf .venv_inference` 로 시작하므로
+> **이미 venv 가 있는 머신에서는 절대 돌리지 말 것.**
+
+### 클론해도 안 따라오는 것 — 실기 전에 채워야 한다
+
+```bash
+★ 없음   gear_sonic_deploy/policy/release/model_decoder.onnx     SONIC 디코더
+★ 없음   gear_sonic_deploy/policy/release/model_encoder.onnx
+★ 없음   gear_sonic_deploy/planner/target_vel/V2/planner_sonic.onnx
+★ 없음   gear_sonic_deploy/target/release/g1_deploy_onnx_ref     C++ 바이너리
+```
+
+`observation_config.yaml` 은 추적되는데 **짝이 되는 ONNX 만 없다** — 설정만 있고 모델이
+없는 상태가 된다. 둘 다 복구 가능하다:
+
+```bash
+python download_from_hf.py            # policy/release/*.onnx + planner (HF stock)
+cd gear_sonic_deploy && just build    # C++ 바이너리
+```
+
+문서 이미지 40장은 **전부 git 에 있다.**
+
+### 백업 서버라면 — git 밖에 있는 것만 옮기면 된다
+
+코드는 GitHub 에 있으므로 **파일로 옮길 것은 "다시 만들 수 없는 것" 뿐이다.**
+
+| 대상 | 크기 | 복구 가능? | 백업 |
+|---|---|---|---|
+| **`outputs/raise_arm_banana_merged_v2`** | **169MB** | ❌ **불가** — 실기 텔레오퍼레이션 녹화다 | **필수** |
+| `outputs/` 전체 (원본 세션 포함) | 1.8GB | ❌ 불가 | 권장 |
+| 서버 체크포인트 48개 | 6.5GB/개 | △ 재학습 11시간 × GPU 4장, **데이터셋이 살아 있을 때만** | 선별 (ck18000) |
+| `eval_results/` | 105MB (추적 9 / 전체 217) | ⭕ 체크포인트+데이터셋에서 재생성 | 선택 |
+| `policy/release/*.onnx` | 174MB | ⭕ `download_from_hf.py` | 불필요 |
+| C++ 바이너리 | 5.6MB | ⭕ `just build` | 불필요 |
+| `.venv_*` | 19GB | ⭕ install 스크립트 | **하지 말 것** |
+
+**가장 중요한 것은 데이터셋 169MB 다.** 로봇 앞에서 사람이 VR 로 79 에피소드를 다시 찍는
+것 말고는 복구 방법이 없다. 체크포인트가 날아가도 데이터셋만 있으면 다시 학습하면 되지만,
+반대는 성립하지 않는다.
+
+```bash
+# 최소 백업 — 이것만은 반드시
+rsync -ahP outputs/raise_arm_banana_merged_v2 <백업서버>:~/backup/
+
+# 확정 체크포인트 한 개 (추론에 필요한 6.5GB 만; 옵티마이저 상태 27GB 는 제외)
+rsync -ahP --include='config.json' --include='embodiment_id.json' \
+  --include='experiment_cfg/***' --include='model-*.safetensors' \
+  --include='model.safetensors.index.json' --include='processor_config.json' \
+  --include='statistics.json' --exclude='*' \
+  kist-5090:/home/ltw1203/groot_output/rab-v2b-20260806/checkpoint-18000/ \
+  <백업서버>:~/backup/rab-v2b-ck18000/
+```
+
+> `statistics.json` 과 `experiment_cfg/` 는 정규화 통계·모달리티 설정이라 **빠지면 서버가
+> 뜨긴 하지만 출력이 망가진다.** 위 목록을 줄이지 말 것.
 
 ## 저장소 구조가 두 브랜치로 갈려 있다
 
