@@ -145,72 +145,66 @@ v1 결과: cross가 within의 2.4~2.8배로 갈렸으나 **방향이 반대**였
 넣어도 팔을 안 들고 오히려 빈 이미지에서 크게 움직임). 음성 4%로는 학습 불가라는
 결론이었고, v2는 32%다.
 
-## STEP 7 — MuJoCo 폐루프 안전 확인 (로컬 CPU)
+## STEP 7 — MuJoCo sim2sim 폐루프 (NVIDIA 구현)
 
-open-loop 지표가 "토큰이 얼마나 정확한가"를 재는 반면, 여기서는 **그 토큰을 실제로
-이어서 실행하면 어떻게 움직이는가**를 본다. open-loop 은 매 프레임 이력을 GT로
-재고정하므로 발산·낙상을 볼 수 없다.
+**NVIDIA 개발자들이 만든 `run_sim_loop.py` 를 쓴다.** 이것이 실기와 같은 구조의
+진짜 폐루프다 — MuJoCo가 카메라를 렌더링해 ZMQ로 발행하고, VLA가 그 영상을 보고
+매 순간 토큰을 새로 만든다.
 
-### 7-1. 대조군 먼저 (필수)
+| | run_sim_loop (NVIDIA) |
+|---|---|
+| 시각 입력 | ✅ MuJoCo 카메라 렌더 → ZMQ 발행 (`image_publish_utils.py`) |
+| VLA | ✅ 루프 안에 있음 — 매번 새 이미지를 보고 추론 |
+| 손 | ✅ `with_hands=True` 기본 — Dex3-1 포함 |
+| 실기와의 차이 | 로봇 하드웨어 대신 시뮬레이터 |
 
-```bash
-$SC/onnxenv/bin/python gear_sonic/scripts/closed_loop_mujoco.py \
-    --preds-dir  $SC/preds_v2_h10 \                    # 덤프된 토큰 폴더
-    --dataset    outputs/raise_arm_banana_v2_val \     # 라벨(ep번호·POS/NEG) 출처
-    --checkpoints <best> \                             # val/loss 최저 체크포인트
-    --trajs 0 1 \                                      # 순번 — 아래 표 참조
-    --source gt                                        # ★정답 토큰 = 대조군
-```
-
-**[확인]** GT로 넘어지지 않고, 양성 traj 의 오른팔 가동범위가 데이터셋 실측과
-비슷해야 한다(v1: 시뮬 163.1° vs 실측 159.5°). **여기서 어긋나면 모델이 아니라
-harness 문제**이므로 다음으로 넘어가지 말 것.
-
-### 7-2. 본 검증
+### 7-0. 설치 (로봇 없이 미리 가능)
 
 ```bash
-$SC/onnxenv/bin/python gear_sonic/scripts/closed_loop_mujoco.py \
-    --preds-dir  $SC/preds_v2_h10 \
-    --dataset    outputs/raise_arm_banana_v2_val \
-    --checkpoints <best> 24000 \                       # 최저 지점 + 마지막
-    --trajs 0 1 4 8 \                                  # 음성·양성 섞어서
-    --source pred \                                    # 모델 예측 토큰
-    --chunk-blend-frames 3                             # 실기 블렌딩 반영(선택)
+bash install_scripts/install_mujoco_sim.sh    # .venv_sim 생성
+bash install_scripts/install_inference.sh     # .venv_inference 생성
 ```
 
-**[확인]** 넘어짐 0, 관절한계 위반 0, 토크포화 1% 미만.
-오른팔 가동범위를 7-1의 GT와 비교 — v1은 GT 163° 대비 예측 103~133°로 **20~37% 부족**했다.
+### 7-1. 먼저 sim2sim 기본 동작 익히기 (VLA 없이)
 
-### 7-3. 눈으로 보기
+VLA를 붙이기 전에 시뮬레이터+컨트롤러만으로 조작에 익숙해질 것. 공식 문서
+[quickstart](source/getting_started/quickstart.md) 의 절차다.
 
 ```bash
-# 창을 띄워 실시간 재생 (DISPLAY 필요)
-... --viewer
+# 터미널 1 — MuJoCo 시뮬레이터
+source .venv_sim/bin/activate
+python gear_sonic/scripts/run_sim_loop.py
 
-# 영상으로 저장 (헤드리스 가능, --viewer 와 동시 사용 가능)
-... --video --video-size 960 720
-#   → eval_results/closed_loop_mujoco/video/{source}_ck{N}_traj{K}.mp4
+# 터미널 2 — C++ 컨트롤러 (gear_sonic_deploy/ 에서)
+bash deploy.sh sim
 ```
 
-`--source gt` 와 `--source pred` 를 각각 돌려 나란히 보면 "팔을 얼마나 덜 드는지"가
-수치보다 빠르게 파악된다.
+조작: 터미널 2에서 `]` 로 정책 시작 → MuJoCo 창 클릭 후 `9` 로 로봇을 바닥에 내림
+→ 터미널 2에서 `T` 로 기준 모션 재생 → `O` 로 정지·종료(비상정지).
 
-### v2_val 의 traj 순번 ↔ 에피소드
+**[확인]** 로봇이 넘어지지 않고 서 있어야 한다. 여기가 안 되면 다음으로 가지 말 것.
 
-`--trajs` 는 **에피소드 번호가 아니라 데이터셋 안 순번**이다.
+### 7-2. VLA 를 붙인 폐루프
 
-| traj | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| ep | 12 | 24 | 36 | 47 | **49** | 50 | 51 | 52 | 53 | **57** | **61** | **66** | **70** | **75** |
-| 종류 | POS | POS | POS | POS | **NEG** | POS | POS | POS | POS | **NEG** | **NEG** | **NEG** | **NEG** | **NEG** |
+```bash
+python gear_sonic/scripts/launch_inference.py --sim \
+    --prompt "raise your right arm if you see a banana"
+```
 
-`--dataset` 을 주면 터미널에 `ep49 NEG` 형태로 찍히므로 확인 가능하다.
+tmux 를 쓰지 않는다면 [STEP 8](#step-8--실기-배포) 의 수동 터미널 절차에서
+`--sim` 에 해당하는 부분만 바꿔 쓴다. 키 입력은
+`gear_sonic/scripts/keyboard_publisher.py` 로 대신할 수 있다.
 
-**흰 줄 대조군**: 음성 6개 중 **traj4(ep49)만 바닥에 흰 줄이 없다.** traj4 와
-traj9~13 을 비교해 ep49 에서만 성능이 나쁘면 모델이 바나나가 아니라 **흰 줄**을
-보고 판별하는 것이다.
+**[확인 항목]**
+- 넘어지지 않는가
+- **바나나가 시야에 있을 때만 오른팔을 드는가** — STEP 6에서 답을 못 낸
+  "정지 상태에서 바나나를 보여주면 실제로 팔이 올라가는가"가 여기서 갈린다
+- `--action-publish-rate 25` 를 쓰고 있는가 (기본 50이면 동작이 2배 빨라진다)
 
----
+### 체크포인트 지정
+
+`--model-path` 로 STEP 1~5 에서 고른 체크포인트를 준다. 서버에 있으므로 로컬로
+복사하거나 PolicyServer 를 서버에서 띄우고 포트 포워딩한다(8-1 참조).
 
 ---
 
@@ -468,16 +462,16 @@ New action chunk (prompt: "...", latency: 0.132s)
 **② 블렌딩 프레임 수** — `--chunk-blend-frames 3` 이 적절한지.
 
 - 동작이 굼뜨면 `2` 로 줄인다
-- **주의**: MuJoCo 실측에서 블렌딩 3프레임이 몸통 기울기를 18.2° → 26.9° 로 **늘렸다.** 넘어지진 않았지만 흔들림이 커졌으므로 실기에서 자세를 잘 볼 것
+- **미검증**: 블렌딩은 하드웨어에서 확인한 적이 없어 기본값이 `0`(꺼짐)이다. 켤 때는 자세 흔들림을 보면서 늘릴 것
 - 이상하면 `0` 으로 즉시 원복
 
-**③ 동작 크기** — 시뮬에서 모델은 GT 대비 팔을 **20~37% 덜 들었다**(163° → 103~133°). 실기에서도 같은 경향인지 확인.
+**③ 동작 크기** — open-loop 평가에서 모델의 어깨 pitch 진폭은 GT 명령의 **95~99%** 였다(ck18000 기준). 다만 **로봇은 명령의 82%까지만 도달한다**(PD 정상상태 오차, 어깨 pitch 평균 −14.9°) — 데이터 수집 때와 같은 현상이므로 정상이다.
 
 **④ 조건부 판별** — 바나나 있음/없음에서 실제로 갈리는지. **이것만은 실기에서만 확인 가능하다.**
 
 ## 8-8. 안전
 
-- MuJoCo 폐루프에서 **넘어짐 0, 관절한계 위반 0, 토크포화 0.2%** 를 확인했다(STEP 7). 다만 그건 덤프된 토큰 재생이고, 실기는 매 순간 이미지를 보고 토큰을 새로 만든다 — **예상 못 한 이미지에서 다른 토큰이 나올 수 있다.**
+- **실기 전에 STEP 7 sim2sim 을 반드시 통과할 것.** 시뮬에서 넘어지면 실기에서도 넘어진다.
 - 첫 구동은 **사람이 붙잡을 수 있는 상태**로, `p` 로 언제든 일시정지할 수 있게 준비.
 - `--initial-pose-blend-duration 1.0` (기본) 유지. `0` 은 초기 자세로 순간 이동해 위험하다.
 

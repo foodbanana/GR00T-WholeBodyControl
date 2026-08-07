@@ -121,7 +121,10 @@ def main() -> None:
     )
 
     print("\n=== 체크포인트별 오른팔 RMSE (도) ===")
-    print(f"{'ckpt':>7} {'양성4ep':>10} {'음성1ep':>10} {'전체29관절(양성)':>18}")
+    # 에피소드 개수는 데이터셋마다 다르므로 헤더도 실제 개수로 찍는다.
+    n_pos = sum(1 for k in kinds.values() if k == "positive")
+    n_neg = len(kinds) - n_pos
+    print(f"{'ckpt':>7} {f'양성{n_pos}ep':>10} {f'음성{n_neg}ep':>10} {'전체29관절(양성)':>18}")
     for ck in cfg.checkpoints:
         r = [x for x in rows if x["checkpoint"] == ck]
         pos = [x for x in r if x["kind"] == "positive"]
