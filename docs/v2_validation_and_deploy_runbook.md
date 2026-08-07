@@ -58,17 +58,17 @@ EOF
 ssh kist-5090 'bash -lc "
 source ~/groot_env.sh; cd ~/Isaac-GR00T
 nohup bash -c '\''
-OUT=/home/ltw1203/groot_output/rab-v2b-20260806
-VAL=/home/ltw1203/dataset/raise_arm_banana_v2_val
+OUT=/home/<USER>/groot_output/rab-v2b-20260806
+VAL=/home/<USER>/dataset/raise_arm_banana_v2_val
 for CK in \$(seq 500 500 24000); do
   echo \"=== ck\$CK ===\"
   CUDA_VISIBLE_DEVICES=0 uv run --no-sync python scripts/eval/dump_open_loop_predictions.py dump \
     --model-path \$OUT/checkpoint-\$CK --dataset-path \$VAL \
     --embodiment-tag UNITREE_G1_SONIC --execution-horizon 10 \
-    --out-dir /home/ltw1203/eval_v2/preds_h10/ck\$CK 2>&1 | tail -2
+    --out-dir /home/<USER>/eval_v2/preds_h10/ck\$CK 2>&1 | tail -2
 done
 echo DONE
-'\'' > /home/ltw1203/dump_v2.log 2>&1 &
+'\'' > /home/<USER>/dump_v2.log 2>&1 &
 echo launched
 "'
 ```
@@ -89,7 +89,7 @@ for CK in 3000 3500 4000; do   # 예: 최저가 3500 부근일 때
 ```bash
 cd /home/edgexpert00/GR00T-WholeBodyControl
 SC=<scratchpad>
-rsync -az kist-5090:'/home/ltw1203/eval_v2/preds_h10/' $SC/preds_v2_h10/
+rsync -az kist-5090:'/home/<USER>/eval_v2/preds_h10/' $SC/preds_v2_h10/
 ```
 
 ## STEP 4 — 디코드 (로컬 CPU, GPU 불필요)
@@ -290,7 +290,7 @@ which is a gated Hugging Face repo.
 ```
 
 GR00T 체크포인트는 **VLM 백본을 항상 별도로 로드**한다. 이 서버는 백본과 HF 토큰이
-`~/hf_cache` 에 있고, 그 경로는 `groot_env.sh` 의 `export HF_HOME=/home/ltw1203/hf_cache`
+`~/hf_cache` 에 있고, 그 경로는 `groot_env.sh` 의 `export HF_HOME=/home/<USER>/hf_cache`
 로만 잡힌다.
 
 | 경로 | 내용 |

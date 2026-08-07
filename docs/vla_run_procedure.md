@@ -34,8 +34,8 @@
 
 ```bash
 # 서버 접속 (2단)
-ssh ltw1203@161.122.21.93 -p 4648
-ssh 192.168.135.101 -p 4648
+ssh <USER>@<GATEWAY_IP> -p 4648
+ssh <GPU_SERVER_IP> -p 4648
 
 # ★ HF_HOME 을 설정한다. 없으면 VLM 백본(Cosmos-Reason2-2B, gated repo)을
 #   받으려다 401 로 죽는다. --model-path 가 로컬이어도 백본은 항상 HF 를 탄다.
@@ -85,7 +85,7 @@ ss -ltn | grep 5551
 
 ```bash
 ping -c 3 192.168.123.164
-ssh unitree@192.168.123.164        # pw: 123
+ssh unitree@192.168.123.164        # 비밀번호는 별도 전달
 
 cd ~/tw_gearsonic/GR00T-WholeBodyControl
 # autosuspend 는 D405(손목)용이라 head-only 면 생략 가능

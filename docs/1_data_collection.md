@@ -64,7 +64,7 @@ VLA 파인튜닝용 **LeRobot v2.1 데이터셋**을 PICO VR 텔레오퍼레이�
 ```bash
 # DGX 에서 Orin 접속
 ping -c 3 192.168.123.164
-ssh unitree@192.168.123.164          # pw: 123
+ssh unitree@192.168.123.164          # 비밀번호는 별도 전달
 
 # --- 이하 Orin ---
 # 인터넷이 필요하면 (git pull, 이미지 빌드)

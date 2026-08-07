@@ -14,7 +14,7 @@
 **아래 값을 믿지 말고 매번 실측할 것.**
 
 ```bash
-ssh unitree@192.168.123.164        # pw: 123
+ssh unitree@192.168.123.164        # 비밀번호는 별도 전달
 cd ~/tw_gearsonic/GR00T-WholeBodyControl
 ./docker/list_realsense_serials.sh
 ```
@@ -40,7 +40,7 @@ cd ~/tw_gearsonic/GR00T-WholeBodyControl
 ### 터미널1 — 카메라 서버 (★ 로봇 온보드 Orin에서 실행, DGX 아님)
 
 ```bash
-ssh unitree@192.168.123.164        # pw: 123
+ssh unitree@192.168.123.164        # 비밀번호는 별도 전달
 cd ~/tw_gearsonic/GR00T-WholeBodyControl
 
 # autosuspend 스크립트는 D405(손목)용 → head-only면 생략 가능 (돌려도 무해)

@@ -82,7 +82,7 @@ D435i(머리) + D405×2(손목) 세 대를 **모두 librealsense RSUSB로 직결
 ```bash
 # (DGX에서 Orin 접속 / 필요시 Orin wifi)
 ping -c 3 192.168.123.164
-ssh unitree@192.168.123.164            # pw: 123
+ssh unitree@192.168.123.164            # 비밀번호는 별도 전달
 # sudo nmcli device wifi connect "delight" password "shy80@kist"   # 네트워크 바꿀 때만(공유주의)
 
 # --- 이하 Orin에서 ---

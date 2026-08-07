@@ -6,7 +6,7 @@
 
 전제:
 - 서버에 Isaac-GR00T 환경 **없음** (처음부터 세팅)
-- 데이터 전송 출발지: **DGX Spark** (161.122.21.93:4648 도달 확인됨)
+- 데이터 전송 출발지: **DGX Spark** (<GATEWAY_IP>:4648 도달 확인됨)
 - 서버 외부망 가용 여부: **미확인** → Phase 1에서 분기
 - wandb 사용
 
@@ -16,20 +16,20 @@
 
 ```
 DGX Spark (여기)
-   └─ ssh ─▶ 161.122.21.93:4648   데이터서버 cluster100 (NIS+NFS 마스터, /home 제공)
-                └─ ssh ─▶ 192.168.135.101:4648   cluster101 = RTX 5090 x4  ← 학습 실행
+   └─ ssh ─▶ <GATEWAY_IP>:4648   데이터서버 cluster100 (NIS+NFS 마스터, /home 제공)
+                └─ ssh ─▶ <GPU_SERVER_IP>:4648   cluster101 = RTX 5090 x4  ← 학습 실행
 ```
 
 - `/home` 은 데이터서버에서 NFS 마운트 → cluster100과 cluster101이 **같은 홈을 공유**.
   대용량 체크포인트/venv를 여기 두면 느리고 공용 쿼터를 먹는다.
 - `/data` 는 cluster101 **로컬 디스크**.
-  - `/data/data1` (4TB) — `drwxr-xr-x user user` → **ltw1203 쓰기 불가**
+  - `/data/data1` (4TB) — `drwxr-xr-x user user` → **<USER> 쓰기 불가**
   - `/data/data2` (8TB) — `drwxrwxrwx root root` → **쓰기 가능** ✅
 
-→ **작업 루트는 `/data/data2/ltw1203/gr00t`**
+→ **작업 루트는 `/data/data2/<USER>/gr00t`**
 
 ```
-/data/data2/ltw1203/gr00t/
+/data/data2/<USER>/gr00t/
 ├── Isaac-GR00T/                     # 레포 + .venv
 ├── dataset/raise_arm_banana_merged/ # 학습 데이터
 ├── hf_cache/                        # HF_HOME
@@ -47,15 +47,15 @@ mkdir -p ~/.ssh && chmod 700 ~/.ssh
 cat >> ~/.ssh/config <<'EOF'
 
 Host kist-gw
-    HostName 161.122.21.93
+    HostName <GATEWAY_IP>
     Port 4648
-    User ltw1203
+    User <USER>
     ServerAliveInterval 30
 
 Host kist-5090
-    HostName 192.168.135.101
+    HostName <GPU_SERVER_IP>
     Port 4648
-    User ltw1203
+    User <USER>
     ProxyJump kist-gw
     ServerAliveInterval 30
 EOF
@@ -130,7 +130,7 @@ echo "===== 기존 도구 ====="; which uv git tmux python3 nvcc; python3 -V
 ## Phase 2 — 작업 폴더 생성
 
 ```bash
-export WORK=/data/data2/ltw1203/gr00t
+export WORK=/data/data2/<USER>/gr00t
 mkdir -p $WORK/{dataset,hf_cache,output,logs}
 ls -ld $WORK $WORK/*
 
@@ -138,7 +138,7 @@ ls -ld $WORK $WORK/*
 cat >> ~/.bashrc <<'EOF'
 
 # ---- GR00T finetune ----
-export WORK=/data/data2/ltw1203/gr00t
+export WORK=/data/data2/<USER>/gr00t
 export HF_HOME=$WORK/hf_cache
 export HF_HUB_DISABLE_XET=1          # Xet 백엔드 속도 저하 회피 (데스크탑에서 확인된 이슈)
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -156,7 +156,7 @@ echo "WORK=$WORK  HF_HOME=$HF_HOME"
 ```bash
 rsync -avhP --stats \
   /home/edgexpert00/GR00T-WholeBodyControl/outputs/raise_arm_banana_merged \
-  kist-5090:/data/data2/ltw1203/gr00t/dataset/
+  kist-5090:/data/data2/<USER>/gr00t/dataset/
 ```
 
 검증 (서버에서):
@@ -202,7 +202,7 @@ cd Isaac-GR00T && git log -1 --oneline
 ```bash
 # DGX Spark
 git clone https://github.com/NVIDIA/Isaac-GR00T.git /tmp/Isaac-GR00T
-rsync -avhP /tmp/Isaac-GR00T kist-5090:/data/data2/ltw1203/gr00t/
+rsync -avhP /tmp/Isaac-GR00T kist-5090:/data/data2/<USER>/gr00t/
 ```
 
 ### 4-3. 의존성 설치
@@ -294,7 +294,7 @@ du -sh $WORK/hf_cache
 # 데스크탑(taeung)에서
 rsync -avhP ~/.cache/huggingface/hub/models--nvidia--GR00T-N1.7-3B \
             ~/.cache/huggingface/hub/models--nvidia--Cosmos-Reason2-2B \
-  kist-5090:/data/data2/ltw1203/gr00t/hf_cache/hub/
+  kist-5090:/data/data2/<USER>/gr00t/hf_cache/hub/
 ```
 
 ### 5-3. wandb 로그인
@@ -429,13 +429,13 @@ df -h /data/data2
 
 ```bash
 # 진행 로그
-ssh kist-5090 'tail -f /data/data2/ltw1203/gr00t/logs/train_*.log'
+ssh kist-5090 'tail -f /data/data2/<USER>/gr00t/logs/train_*.log'
 
 # GPU
 ssh kist-5090 'watch -n5 nvidia-smi'
 
 # 체크포인트
-ssh kist-5090 'ls -lh /data/data2/ltw1203/gr00t/output/raise_arm_banana_n17/'
+ssh kist-5090 'ls -lh /data/data2/<USER>/gr00t/output/raise_arm_banana_n17/'
 ```
 
 wandb: `https://wandb.ai/<계정>/g1-sonic-raise-arm-banana`
@@ -462,9 +462,9 @@ python gear_sonic/scripts/launch_inference.py \
     --prompt "raise your right arm if you see a banana"
 ```
 
-> 서버(161.122.21.93 뒤 사설망 192.168.135.101)는 로봇 네트워크에서 직접 안 보인다.
+> 서버(<GATEWAY_IP> 뒤 사설망 <GPU_SERVER_IP>)는 로봇 네트워크에서 직접 안 보인다.
 > 실기 추론 시에는 SSH 리버스 터널이 필요하다:
-> `ssh -N -L 5550:192.168.135.101:5550 kist-gw` 형태로 5550 포워딩.
+> `ssh -N -L 5550:<GPU_SERVER_IP>:5550 kist-gw` 형태로 5550 포워딩.
 
 ---
 

@@ -134,7 +134,7 @@ all29/                  에피소드별 29관절 전체
 ssh kist-5090 'bash ~/dump_v2_full.sh'
 
 # 2. 로컬로 가져와 디코드 (CPU)
-rsync -az kist-5090:'/home/ltw1203/eval_v2/preds_h10/' $SC/preds_v2_h10/
+rsync -az kist-5090:'/home/<USER>/eval_v2/preds_h10/' $SC/preds_v2_h10/
 $SC/onnxenv/bin/python gear_sonic/scripts/eval_decoded_openloop.py \
     --dataset outputs/raise_arm_banana_v2_val --preds-dir $SC/preds_v2_h10 \
     --out eval_results/decoded_openloop_v2_h10

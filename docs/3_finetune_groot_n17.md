@@ -18,8 +18,8 @@
 
 ```
 DGX Spark
-   └─ ssh ─▶ 161.122.21.93:4648        cluster100 (NIS+NFS 마스터, /home 제공)
-                └─ ssh ─▶ 192.168.135.101:4648   cluster101 = RTX 5090 × 4  ← 학습
+   └─ ssh ─▶ <GATEWAY_IP>:4648        cluster100 (NIS+NFS 마스터, /home 제공)
+                └─ ssh ─▶ <GPU_SERVER_IP>:4648   cluster101 = RTX 5090 × 4  ← 학습
 ```
 
 DGX Spark 에 SSH config 를 한 번 등록해 두면 `ssh kist-5090` 한 줄로 붙는다:
@@ -29,15 +29,15 @@ mkdir -p ~/.ssh && chmod 700 ~/.ssh
 grep -q 'Host kist-5090' ~/.ssh/config 2>/dev/null || cat >> ~/.ssh/config <<'EOF'
 
 Host kist-gw
-    HostName 161.122.21.93
+    HostName <GATEWAY_IP>
     Port 4648
-    User ltw1203
+    User <USER>
     ServerAliveInterval 30
 
 Host kist-5090
-    HostName 192.168.135.101
+    HostName <GPU_SERVER_IP>
     Port 4648
-    User ltw1203
+    User <USER>
     ProxyJump kist-gw
     ServerAliveInterval 30
 EOF
@@ -47,7 +47,7 @@ chmod 600 ~/.ssh/config
 ssh-copy-id kist-gw       # 비밀번호 1회
 ssh-copy-id kist-5090     # 홈이 NFS 공유라 보통 이미 통과됨
 
-ssh kist-5090 'hostname; whoami'   # 무암호로 RTX5090 / ltw1203 이면 성공
+ssh kist-5090 'hostname; whoami'   # 무암호로 RTX5090 / <USER> 이면 성공
 ```
 
 이 설정은 학습뿐 아니라 **평가**([4번](4_evaluation.md))와 **실기 배포 SSH 터널**([5번](5_deploy.md))에서도
@@ -57,7 +57,7 @@ ssh kist-5090 'hostname; whoami'   # 무암호로 RTX5090 / ltw1203 이면 성�
 
 | | 경로 | 비고 |
 |---|---|---|
-| v1 계획 (`server_finetune_runbook.md`) | `/data/data2/ltw1203/gr00t/{Isaac-GR00T,dataset,hf_cache,output}` | cluster101 **로컬 디스크**. 런북은 NFS 홈을 피하라고 권고 |
+| v1 계획 (`server_finetune_runbook.md`) | `/data/data2/<USER>/gr00t/{Isaac-GR00T,dataset,hf_cache,output}` | cluster101 **로컬 디스크**. 런북은 NFS 홈을 피하라고 권고 |
 | **v2 실제** ✅ | `~/Isaac-GR00T`, `~/dataset/`, `~/hf_cache/`, `~/groot_output/` | **홈(NFS)**. 아래 이유로 여기가 맞다 |
 | 예외 (실제로 `/data/data2` 를 쓰는 것) | `~/groot_env.sh` 가 지정하는 `torch_ext`, `triton_cache` | 컴파일 캐시만 로컬 디스크 |
 
@@ -69,7 +69,7 @@ ssh kist-5090 'hostname; whoami'   # 무암호로 RTX5090 / ltw1203 이면 성�
 
 | 마운트 | 종류 | 크기 | 여유 | 판정 |
 |---|---|---|---|---|
-| `/home` | **NFS** (`192.168.135.100:/home`) | 28T | **12T** | ✅ 유일한 현실적 선택 |
+| `/home` | **NFS** (`<NFS_IP>:/home`) | 28T | **12T** | ✅ 유일한 현실적 선택 |
 | `/data/data2` | 로컬 NVMe | 7.3T | **159G (98% 사용)** | ❌ 체크포인트가 안 들어간다 |
 | `/data/data1` | 로컬 NVMe | 3.6T | 320G (91%) | ❌ `user:user` 소유, **쓰기 불가** |
 
@@ -87,7 +87,7 @@ run 하나도 못 담는다. **홈에 둔 것은 용량 때문에 강제된 선�
 source ~/groot_env.sh
 ```
 
-**핵심은 `export HF_HOME=/home/ltw1203/hf_cache` 다.** VLM 백본
+**핵심은 `export HF_HOME=/home/<USER>/hf_cache` 다.** VLM 백본
 `nvidia/Cosmos-Reason2-2B` 는 **gated 저장소**이고, 토큰과 캐시가 이 경로에만 있다.
 
 | 경로 | 내용 |
@@ -109,14 +109,14 @@ which is a gated Hugging Face repo.
 ### `~/groot_env.sh` 전문 (2026-08-07 서버 실물)
 
 ```bash
-export HF_HOME=/home/ltw1203/hf_cache
+export HF_HOME=/home/<USER>/hf_cache
 export HF_HUB_DISABLE_XET=1
-export TORCH_EXTENSIONS_DIR=/data/data2/ltw1203/torch_ext
-export TRITON_CACHE_DIR=/data/data2/ltw1203/triton_cache
+export TORCH_EXTENSIONS_DIR=/data/data2/<USER>/torch_ext
+export TRITON_CACHE_DIR=/data/data2/<USER>/triton_cache
 export PATH="$HOME/.local/bin:$PATH"
 
 # torchcodec 0.8.0 이 요구하는 FFmpeg 7 공유 라이브러리
-export LD_LIBRARY_PATH=/home/ltw1203/ffmpeg7/lib:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=/home/<USER>/ffmpeg7/lib:$LD_LIBRARY_PATH
 
 # 기관 TLS 가로채기(SOOSAN ePrism) 대응
 export UV_SYSTEM_CERTS=1

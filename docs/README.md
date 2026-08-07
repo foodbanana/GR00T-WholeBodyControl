@@ -16,6 +16,24 @@
 
 **대상 독자**: GR00T / Unitree 를 이미 아는 사람. 이 셋업 **고유의 것만** 적었다.
 
+> ### 접속 정보는 자리표시자로 되어 있다
+> 공개 저장소라 서버 주소·계정·비밀번호를 문서에서 뺐다. 아래 자리표시자는
+> **실제 값으로 바꿔서** 쓴다. 값은 담당자에게 별도로 받는다.
+>
+> | 자리표시자 | 무엇인가 |
+> |---|---|
+> | `<GATEWAY_IP>` | KIST 게이트웨이 (SSH 포트 4648) |
+> | `<GPU_SERVER_IP>` | 그 뒤 사설망의 GPU 서버 (RTX 5090 × 4) |
+> | `<NFS_IP>` | `/home` 을 제공하는 NFS 마스터 |
+> | `<USER>` | GPU 서버 계정명. 문서의 `/home/<USER>/...` 경로에도 쓰인다 |
+> | `# 비밀번호는 별도 전달` | 로봇 온보드(`unitree@192.168.123.164`) 비밀번호 |
+>
+> `~/.ssh/config` 에 `kist-gw` / `kist-5090` 별칭을 등록해두면 문서의 명령을
+> 그대로 쓸 수 있다. 등록 방법은
+> [3_finetune_groot_n17.md §0-1](3_finetune_groot_n17.md#0-1-접속--2단-점프) 참조.
+>
+> 로봇 IP `192.168.123.164` 는 Unitree G1 의 **공개된 기본값**이라 그대로 두었다.
+
 ## 시스템 구성
 
 ```
@@ -177,7 +195,7 @@ rsync -ahP --include='config.json' --include='embodiment_id.json' \
   --include='experiment_cfg/***' --include='model-*.safetensors' \
   --include='model.safetensors.index.json' --include='processor_config.json' \
   --include='statistics.json' --exclude='*' \
-  kist-5090:/home/ltw1203/groot_output/rab-v2b-20260806/checkpoint-18000/ \
+  kist-5090:/home/<USER>/groot_output/rab-v2b-20260806/checkpoint-18000/ \
   <백업서버>:~/backup/rab-v2b-ck18000/
 ```
 

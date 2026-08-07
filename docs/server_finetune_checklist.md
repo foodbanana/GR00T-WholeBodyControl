@@ -6,7 +6,7 @@
 현재 상태 (2026-07-29 기준):
 - ✅ `outputs/raise_arm_banana_merged` 검증 완료 (55 ep / 11,208 frame / 25fps / ego_view 1대 / 128MB)
 - ✅ `meta/info.json` 의 `total_videos`/`splits` 수정 완료 (다른 세션에서 처리됨)
-- ✅ DGX Spark → 161.122.21.93:4648 TCP 도달 확인
+- ✅ DGX Spark → <GATEWAY_IP>:4648 TCP 도달 확인
 - ⬜ Phase 0부터 시작
 
 각 STEP의 **[검증]** 이 통과해야 다음으로 넘어간다.
@@ -52,15 +52,15 @@ mkdir -p ~/.ssh && chmod 700 ~/.ssh
 grep -q 'Host kist-5090' ~/.ssh/config 2>/dev/null || cat >> ~/.ssh/config <<'EOF'
 
 Host kist-gw
-    HostName 161.122.21.93
+    HostName <GATEWAY_IP>
     Port 4648
-    User ltw1203
+    User <USER>
     ServerAliveInterval 30
 
 Host kist-5090
-    HostName 192.168.135.101
+    HostName <GPU_SERVER_IP>
     Port 4648
-    User ltw1203
+    User <USER>
     ProxyJump kist-gw
     ServerAliveInterval 30
 EOF
@@ -71,7 +71,7 @@ ssh-copy-id kist-gw       # 서버 비밀번호 입력
 ssh-copy-id kist-5090     # 서버 비밀번호 입력
 ```
 
-**[검증]** 무암호로 `RTX5090` / `ltw1203` 이 나와야 한다.
+**[검증]** 무암호로 `RTX5090` / `<USER>` 이 나와야 한다.
 
 ```bash
 ssh kist-5090 'hostname; whoami'
@@ -111,12 +111,12 @@ EOF
 
 ```bash
 ssh kist-5090 'bash -s' <<'EOF'
-export WORK=/data/data2/ltw1203/gr00t
+export WORK=/data/data2/<USER>/gr00t
 mkdir -p $WORK/{dataset,hf_cache,output,logs}
 grep -q 'GR00T finetune' ~/.bashrc || cat >> ~/.bashrc <<'BRC'
 
 # ---- GR00T finetune ----
-export WORK=/data/data2/ltw1203/gr00t
+export WORK=/data/data2/<USER>/gr00t
 export HF_HOME=$WORK/hf_cache
 export HF_HUB_DISABLE_XET=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
@@ -126,7 +126,7 @@ ls -ld $WORK $WORK/*
 EOF
 ```
 
-**[검증]** 5개 디렉토리가 `ltw1203` 소유로 생성됨.
+**[검증]** 5개 디렉토리가 `<USER>` 소유로 생성됨.
 
 ---
 
@@ -135,14 +135,14 @@ EOF
 ```bash
 rsync -avhP --stats \
   /home/edgexpert00/GR00T-WholeBodyControl/outputs/raise_arm_banana_merged \
-  kist-5090:/data/data2/ltw1203/gr00t/dataset/
+  kist-5090:/data/data2/<USER>/gr00t/dataset/
 ```
 
 **[검증]**
 
 ```bash
 ssh kist-5090 'bash -s' <<'EOF'
-D=/data/data2/ltw1203/gr00t/dataset/raise_arm_banana_merged
+D=/data/data2/<USER>/gr00t/dataset/raise_arm_banana_merged
 du -sh $D
 echo "parquet: $(ls $D/data/chunk-000 | wc -l)  (기대 55)"
 echo "mp4    : $(ls $D/videos/chunk-000/observation.images.ego_view | wc -l)  (기대 55)"
@@ -172,7 +172,7 @@ EOF
 ```bash
 # DGX Spark
 git clone https://github.com/NVIDIA/Isaac-GR00T.git /tmp/Isaac-GR00T
-rsync -avhP /tmp/Isaac-GR00T kist-5090:/data/data2/ltw1203/gr00t/
+rsync -avhP /tmp/Isaac-GR00T kist-5090:/data/data2/<USER>/gr00t/
 # uv 바이너리: 서버 아키텍처(x86_64) 맞는 릴리스를 받아 scp
 #   https://github.com/astral-sh/uv/releases → uv-x86_64-unknown-linux-gnu.tar.gz
 ```
@@ -265,7 +265,7 @@ du -sh $HF_HOME
 # 데스크탑(taeung)에서
 rsync -avhP ~/.cache/huggingface/hub/models--nvidia--GR00T-N1.7-3B \
             ~/.cache/huggingface/hub/models--nvidia--Cosmos-Reason2-2B \
-  kist-5090:/data/data2/ltw1203/gr00t/hf_cache/hub/
+  kist-5090:/data/data2/<USER>/gr00t/hf_cache/hub/
 ```
 
 **[검증]** `du -sh $HF_HOME` 이 수 GB 이상.
@@ -377,7 +377,7 @@ uv run python gr00t/experiment/launch_finetune.py \
 **첫 체크포인트(step 1000) 직후 반드시 확인 — 용량 폭주 방지:**
 
 ```bash
-ssh kist-5090 'du -sh /data/data2/ltw1203/gr00t/output/raise_arm_banana_n17/checkpoint-1000; df -h /data/data2'
+ssh kist-5090 'du -sh /data/data2/<USER>/gr00t/output/raise_arm_banana_n17/checkpoint-1000; df -h /data/data2'
 ```
 
 체크포인트 1개 × 10개가 `/data/data2` 여유를 넘기면 `--save-total-limit` 을 낮춰 재시작.
@@ -387,9 +387,9 @@ ssh kist-5090 'du -sh /data/data2/ltw1203/gr00t/output/raise_arm_banana_n17/chec
 ## STEP 11 — 모니터링
 
 ```bash
-ssh kist-5090 'tail -f /data/data2/ltw1203/gr00t/logs/train_*.log'
+ssh kist-5090 'tail -f /data/data2/<USER>/gr00t/logs/train_*.log'
 ssh kist-5090 'watch -n5 nvidia-smi'
-ssh kist-5090 'ls -lh /data/data2/ltw1203/gr00t/output/raise_arm_banana_n17/'
+ssh kist-5090 'ls -lh /data/data2/<USER>/gr00t/output/raise_arm_banana_n17/'
 ```
 
 wandb: `https://wandb.ai/<계정>/g1-sonic-raise-arm-banana`

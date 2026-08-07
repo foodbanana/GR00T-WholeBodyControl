@@ -151,14 +151,14 @@ $SC/onnxenv/bin/python gear_sonic/scripts/eval_decoded_gate.py \
 #!/bin/bash
 source ~/groot_env.sh
 cd ~/Isaac-GR00T
-OUT=/home/ltw1203/groot_output/rab-v2b-20260806
-VAL=/home/ltw1203/dataset/raise_arm_banana_v2_val
+OUT=/home/<USER>/groot_output/rab-v2b-20260806
+VAL=/home/<USER>/dataset/raise_arm_banana_v2_val
 for CK in 1000 2000 5000 6000 7000 8000 9000 10000 11000 13000 14000 16000 18000 20000 22000 24000; do
   echo "=== ck$CK  $(date +%T) ==="
   CUDA_VISIBLE_DEVICES=0 uv run --no-sync python scripts/eval/dump_open_loop_predictions.py dump \
     --model-path $OUT/checkpoint-$CK --dataset-path $VAL \
     --embodiment-tag UNITREE_G1_SONIC --execution-horizon 10 \
-    --out-dir /home/ltw1203/eval_v2/preds_h10/ck$CK 2>&1 | tail -1
+    --out-dir /home/<USER>/eval_v2/preds_h10/ck$CK 2>&1 | tail -1
 done
 echo "DONE $(date +%T)"
 ```
@@ -201,7 +201,7 @@ ssh kist-5090 'nohup bash ~/dump_v2_full.sh > ~/dump_v2_full.log 2>&1 & echo lau
 ```bash
 cd ~/GR00T-WholeBodyControl
 SC=scratchpad
-rsync -az kist-5090:'/home/ltw1203/eval_v2/preds_h10/' $SC/preds_v2_h10/
+rsync -az kist-5090:'/home/<USER>/eval_v2/preds_h10/' $SC/preds_v2_h10/
 
 $SC/onnxenv/bin/python gear_sonic/scripts/eval_decoded_openloop.py \
     --dataset outputs/raise_arm_banana_v2_val \
@@ -434,7 +434,7 @@ done
 ```bash
 SC=scratchpad
 for d in v2_ck2000 v2_ck18000 v2_ck24000; do
-  rsync -az kist-5090:/home/ltw1203/cross_cond/$d $SC/cross_cond/
+  rsync -az kist-5090:/home/<USER>/cross_cond/$d $SC/cross_cond/
 done
 ```
 

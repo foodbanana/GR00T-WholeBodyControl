@@ -142,8 +142,8 @@ T2 터널을 생략, T6 의 `--port` 를 `5550` 으로 되돌리면 된다.
 
 ```bash
 # 서버 접속 (2단)
-ssh ltw1203@161.122.21.93 -p 4648
-ssh 192.168.135.101 -p 4648
+ssh <USER>@<GATEWAY_IP> -p 4648
+ssh <GPU_SERVER_IP> -p 4648
 # 또는 SSH config 를 등록했다면:  ssh kist-5090
 
 tmux new -s policy                      # SSH 를 닫아도 살아 있게
@@ -194,7 +194,7 @@ ss -ltn | grep 5551
 
 ```bash
 ping -c 3 192.168.123.164
-ssh unitree@192.168.123.164        # pw: 123
+ssh unitree@192.168.123.164        # 비밀번호는 별도 전달
 
 cd ~/tw_gearsonic/GR00T-WholeBodyControl
 # autosuspend 는 D405(손목)용이라 head-only 면 생략 가능
