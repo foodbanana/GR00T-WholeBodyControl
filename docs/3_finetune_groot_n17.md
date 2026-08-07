@@ -484,7 +484,7 @@ ssh kist-5090 'ls ~/groot_output/rab-v2b-20260806/ | grep checkpoint | sort -t- 
 ```
 
 wandb 프로젝트는 **`groot-n17-sonic`**, run 이름은 `rab-v2b-20260806` 이다
-(`wandb_project` 는 conf.yaml 로 확인. 계정은 `twvirus7338`).
+(`wandb_project` 는 conf.yaml 로 확인. 계정은 `<WANDB_USER>`).
 
 **중단 판단**
 - 초반 수백 step 에서 loss 가 평평하거나 NaN → **즉시 중단**, 데이터/정규화 경로 점검
