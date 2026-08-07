@@ -55,8 +55,19 @@ python3 -m venv scratchpad/onnxenv
 scratchpad/onnxenv/bin/pip install onnxruntime numpy pyarrow matplotlib
 ```
 
-이하 명령에서 `$SC` = 이 venv 를 둔 디렉터리로 읽는다. 한글 라벨이 네모로 깨지면
-`Noto Sans CJK KR` 폰트를 설치한다 (`plot_checkpoint_sweep.py` 가 이 폰트를 지정한다).
+이하 명령에서 `$SC` = 이 venv 를 둔 디렉터리로 읽는다.
+
+> ### ⚠️ 이 venv 는 **지금 DGX Spark 에 없다** (2026-08-07 확인)
+> 평가를 돌린 뒤 정리됐다. 리포의 4개 venv(`.venv_inference`, `.venv_data_collection`,
+> `.venv_sim`, `.venv_teleop`) **어디에도 `onnxruntime` 이 없으므로**, 디코드·플롯을
+> 다시 하려면 위 두 줄을 먼저 실행해야 한다. 인터넷이 필요하다.
+>
+> `scratchpad/` 는 gitignore 대상이라 클론해도 안 따라온다. 무겁지 않으니(4개 패키지)
+> 그때그때 만드는 것을 전제로 한다.
+
+한글 폰트는 **DGX Spark 에 이미 설치돼 있다**(`Noto Sans CJK` 계열 35종, 2026-08-07 확인).
+다른 머신에서 라벨이 네모로 깨지면 `Noto Sans CJK KR` 을 설치한다
+(`plot_checkpoint_sweep.py` 가 이 폰트를 지정한다).
 
 ### 1-2. WBC decoder ONNX
 
@@ -134,36 +145,52 @@ $SC/onnxenv/bin/python gear_sonic/scripts/eval_decoded_gate.py \
 > 에 남아 있는데, 실기보다 재추론이 뜸해 **비관적으로 나온다**(평균 23.54° vs h10 20.29°).
 > 참고용으로만 본다.
 
+**서버에 배치 스크립트를 두고 nohup 으로 돌린다.** v2 때 쓴 `~/dump_v2_full.sh` 실물:
+
 ```bash
-ssh kist-5090 'bash -lc "
-source ~/groot_env.sh; cd ~/Isaac-GR00T
-nohup bash -c '\''
+#!/bin/bash
+source ~/groot_env.sh
+cd ~/Isaac-GR00T
 OUT=/home/ltw1203/groot_output/rab-v2b-20260806
 VAL=/home/ltw1203/dataset/raise_arm_banana_v2_val
-for CK in \$(seq 500 500 24000); do
-  echo \"=== ck\$CK ===\"
+for CK in 1000 2000 5000 6000 7000 8000 9000 10000 11000 13000 14000 16000 18000 20000 22000 24000; do
+  echo "=== ck$CK  $(date +%T) ==="
   CUDA_VISIBLE_DEVICES=0 uv run --no-sync python scripts/eval/dump_open_loop_predictions.py dump \
-    --model-path \$OUT/checkpoint-\$CK --dataset-path \$VAL \
+    --model-path $OUT/checkpoint-$CK --dataset-path $VAL \
     --embodiment-tag UNITREE_G1_SONIC --execution-horizon 10 \
-    --out-dir /home/ltw1203/eval_v2/preds_h10/ck\$CK 2>&1 | tail -2
+    --out-dir /home/ltw1203/eval_v2/preds_h10/ck$CK 2>&1 | tail -1
 done
-echo DONE
-'\'' > /home/ltw1203/dump_v2.log 2>&1 &
-echo launched
-"'
+echo "DONE $(date +%T)"
 ```
 
-진행 확인: `ssh kist-5090 'tail -5 ~/dump_v2.log'`
+```bash
+ssh kist-5090 'nohup bash ~/dump_v2_full.sh > ~/dump_v2_full.log 2>&1 & echo launched'
+```
 
-> **48개를 전부 덤프하면 약 2시간**이다. **val/loss 최저 지점 ±2~3개만** 고르면 10분 안에 끝난다.
-> 곡선 전체는 로그에 남아 있으므로 나중에 다른 지점을 추가로 덤프해도 된다.
->
-> ```bash
-> for CK in 3000 3500 4000; do   # 예: 최저가 3500 부근일 때
-> ```
->
-> 다만 v2 에서 확인된 대로 **val/loss 최저가 관절공간 최적이 아니다**([§8](#8-v2-결과--읽고-넘어가야-할-세-가지)).
-> 시간이 되면 넓게 뜨는 편이 낫다.
+진행 확인: `ssh kist-5090 'tail -5 ~/dump_v2_full.log'`
+
+### 📌 실제로는 48개가 아니라 **19개**를 1000 step 간격으로 떴다
+
+먼저 `~/dump_v2.sh` 로 3개(`3000 4000 12000`)를, 이어서 위 `~/dump_v2_full.sh` 로 16개를 떴다.
+합쳐서 `1000, 2000, …, 14000, 16000, 18000, 20000, 22000, 24000` = **19개**이고,
+`metrics.csv` 와 `decoded.npz` 에 담긴 것도 이 19개다. (15000/17000/19000/21000/23000 과
+500 단위 지점은 덤프하지 않았다 — 체크포인트 자체는 서버에 48개 다 있으므로 언제든 추가 가능.)
+
+| 범위 | 소요 |
+|---|---|
+| 1개 | 약 2~3분 |
+| **19개 (v2 실제)** | **약 50분** |
+| 48개 전부 | 약 2시간 |
+
+**val/loss 최저 지점 ±2~3개만** 고르면 10분 안에 끝나지만, v2 에서 확인된 대로
+**val/loss 최저가 관절공간 최적이 아니다**([§8](#8-v2-결과--읽고-넘어가야-할-세-가지)).
+시간이 되면 넓게 뜨는 편이 낫다.
+
+> ### ★ `dump_open_loop_predictions.py` 는 NVIDIA 상류 파일이 아니다
+> 서버 `~/Isaac-GR00T/scripts/eval/` 에 있지만 **git 미추적(`??`) 상태**다. 즉 그 서버 홈이
+> 날아가면 사라진다. **리포에 사본을 두었다**:
+> [gear_sonic/scripts/dump_open_loop_predictions.py](../gear_sonic/scripts/dump_open_loop_predictions.py).
+> 서버에서 돌릴 때는 `gr00t` 패키지가 필요하므로 `~/Isaac-GR00T/scripts/eval/` 에 두고 실행한다.
 
 산출물: `preds_h10/ck<N>/traj_<K>.npz` — 각 npz 에 `gt (T,64)`, `pred (T,64)`.
 
@@ -208,13 +235,26 @@ $SC/onnxenv/bin/python gear_sonic/scripts/plot_decoded_openloop.py \
 ```
 
 > ⚠️ **`--checkpoints` 없이 돌리지 말 것.** `decoded.npz` 에 담긴 체크포인트를 전부 그린다 —
-> v2 기준 48 ckpt × 14 ep × 2 = **1,344장**이 된다. `decoded.npz` 는 이미 디코드가 끝난
+> v2 기준 19 ckpt × 14 ep × 2 = **532장**이 된다. `decoded.npz` 는 이미 디코드가 끝난
 > 파일이라 플롯은 몇 번이든 다시 뽑을 수 있으니, 먼저 좁게 뽑고 필요할 때 추가한다.
+> (위 예시대로 ck 3개를 지정하면 3 × 14 = 42장씩 두 폴더 = 현재 리포에 있는 그 구성이다.)
+
+> ### ⚠️ `--decoded` / `--out` 을 생략하면 **v1 결과를 건드린다**
+> 이 둘은 "필수"가 아니라 **v1 경로가 기본값**이다
+> ([plot_decoded_openloop.py:107-108](../gear_sonic/scripts/plot_decoded_openloop.py#L107-L108)):
+>
+> ```python
+> --decoded  기본값 = eval_results/decoded_openloop_20260806_h10/data/decoded.npz
+> --out      기본값 = eval_results/decoded_openloop_20260806_h10
+> ```
+>
+> 빠뜨리면 에러가 아니라 **v1 데이터를 읽어 v1 폴더에 조용히 덮어쓴다.**
+> v2 를 그릴 때는 **세 인자를 항상 명시한다.**
 
 | 옵션 | 기본값 | 설명 |
 |---|---|---|
-| `--decoded` | — | STEP 3 의 `decoded.npz` (decoder 재실행 없음) |
-| `--out` | — | 출력 디렉터리 |
+| `--decoded` | ⚠️ **v1 경로** | STEP 3 의 `decoded.npz` (decoder 재실행 없음). **명시할 것** |
+| `--out` | ⚠️ **v1 경로** | 출력 디렉터리. **명시할 것** |
 | `--checkpoints` | 전체 | **반드시 지정할 것** |
 | `--all29` | 꺼짐 | 29관절 전체 그림도 생성 (기본은 오른팔 7개만) |
 | `--fps` | `25` | x축 시간 환산 |
@@ -288,19 +328,23 @@ ssh kist-5090 'grep -oE "step [0-9]+  val/loss = [0-9.]+" ~/train_rab_v2b.log' \
 **상태는 고정하고 이미지만 바꿔** 모델이 정말 시각으로 판별하는지 본다.
 `--dataset-path` 의 에피소드끼리 이미지를 교차시킨다.
 
+v2 때 쓴 `~/cross_v2.sh` 실물:
+
 ```bash
-ssh kist-5090 'bash -lc "
-source ~/groot_env.sh; cd ~/Isaac-GR00T
-for CK in 18000 24000; do
+#!/bin/bash
+source ~/groot_env.sh
+cd ~/Isaac-GR00T
+for CK in 18000 24000 2000; do
+  echo "############ ck$CK  $(date +%T) ############"
   CUDA_VISIBLE_DEVICES=0 uv run --no-sync python ~/cross_cond/cross_condition_test.py \
-    --model-path ~/groot_output/rab-v2b-20260806/checkpoint-\$CK \
+    --model-path ~/groot_output/rab-v2b-20260806/checkpoint-$CK \
     --dataset-path ~/dataset/raise_arm_banana_v2_val \
-    --out-dir ~/cross_cond/v2_ck\$CK
+    --out-dir ~/cross_cond/v2_ck$CK 2>&1 | tail -30
 done
-"'
 ```
 
-(리포 사본: [gear_sonic/scripts/cross_condition_test.py](../gear_sonic/scripts/cross_condition_test.py))
+리포 사본 [gear_sonic/scripts/cross_condition_test.py](../gear_sonic/scripts/cross_condition_test.py)
+는 서버본과 **md5 동일**하다(2026-08-07 대조). 어느 쪽을 봐도 같다.
 
 > **이 스크립트는 로컬에서 못 돌린다.** `Gr00tPolicy` 로 실제 추론을 하므로 `gr00t` 패키지와
 > GPU 가 필요하다 — 서버의 `~/Isaac-GR00T` 환경 안에서 실행한다. CLI 는 `tyro` 라
@@ -309,28 +353,69 @@ done
 >
 > `max_bases`/`max_sources` 로 조합 수를 제한한다 — val 이 14개면 14×14×7 = **1,372 조합**이라
 > 그대로 돌리면 과하다. 양성·음성에서 고르게 앞쪽 몇 개만 고른다.
+> v2 는 기본값으로 base 4개(ep12·24 = POS, ep49·57 = NEG) × source 6개 × frame 7개 =
+> **140 조합/체크포인트**로 돌았다.
 >
-> 질의 프레임은 **팔이 아직 올라가기 전(초반)** 으로 잡는다. 팔이 이미 올라간 뒤의 이미지에는
-> 팔 자체가 찍혀 있어 "바나나를 봤는가"와 교란된다.
->
-> ⚠️ **v2 교차조건 결과는 리포에 기록이 없다.** `eval_results/decoded_openloop_v2_h10/README.md`
-> 에도 언급이 없어, STEP 6 이 실제로 돌았는지 불명이다. 서버 `~/cross_cond/` 를 확인할 것.
+> 질의 프레임은 **팔이 아직 올라가기 전(초반)** 으로 잡는다 — v2 는 frame `10,15,20,25,30,35,40`.
+> 팔이 이미 올라간 뒤의 이미지에는 팔 자체가 찍혀 있어 "바나나를 봤는가"와 교란된다.
 
 `NEGATIVE_EPISODES` 를 이 파일도 **자체 복사본으로 들고 있다** — `wbc_decoder.py` 와
 **같은 값을 유지해야 한다**(파일 상단 주석에 명시돼 있다). 데이터셋이 바뀌면 두 곳을 다 고친다.
 
 | 결과 | 해석 |
 |---|---|
-| cross ≫ within **이면서** 바나나 이미지 → 팔 올림 명령 | **판별 학습됨** ✅ |
+| cross ≫ within **이면서** 바나나 이미지 → 팔 올림 방향 | **판별 학습됨** ✅ |
 | cross ≫ within 인데 방향이 무관 | OOD 혼란 (v1 이 이랬다) |
 | cross ≈ within | 이미지를 무시하고 있음 |
 
-> v1 결과: cross 가 within 의 2.4~2.8배로 갈렸으나 **방향이 반대**였다(바나나를 넣어도 팔을
-> 안 들고 오히려 빈 이미지에서 크게 움직임). 음성이 학습의 4% 뿐이라 학습 불가라는 결론이었고,
-> v2 는 32.3% 다.
+### ★ v2 결과 — 돌았고, **v1 의 실패가 뒤집혔다**
 
-**조건부 판별의 최종 확인은 실기에서만 가능하다.** 시뮬 렌더링은 실사와 시각 격차가 커서
-이 질문에는 답이 안 된다 — 그래서 v2 에서는 MuJoCo sim2sim(STEP 7)을 건너뛰고 실기로 갔다.
+2026-08-07 실행. 산출물은 서버 `~/cross_cond/v2_ck{2000,18000,24000}/`
+(`records.json` + `meta.json` + 조합별 `tok_b*_s*_t*.npy`, 각 2.1MB).
+
+| ckpt | within (잡음 바닥) | cross (신호) | **cross/within** | 기대방향 일치 |
+|---|---|---|---|---|
+| ck2000 | 1.061 | 1.552 | 1.46× | **100.0%** (n=84) |
+| **ck18000** | 0.490 | 0.953 | **1.95×** | **100.0%** (n=84) |
+| ck24000 | 0.494 | 0.972 | 1.97× | 98.8% (n=84) |
+
+- **거리**: 같은 state 에 이미지만 갈아끼웠을 때 `self` 토큰으로부터의 거리(프레임당 L2).
+  `within` = 같은 클래스 이미지, `cross` = 반대 클래스 이미지.
+- **기대방향 일치**: 양성 base 들의 self 토큰 평균 − 음성 base 들의 self 토큰 평균을 축으로 잡고,
+  이미지 교체가 만든 변화량을 그 축에 투영한 부호. **바나나 이미지를 넣으면 +, 빈 이미지를 넣으면 −**
+  가 나와야 맞는데 **거의 전부 맞았다.**
+
+> ### 이것이 v1 과 결정적으로 다른 점
+> | | v1 | **v2** |
+> |---|---|---|
+> | cross/within | 2.4~2.8× | 1.95× (더 작다) |
+> | **방향** | ❌ **반대** — 바나나를 넣어도 팔을 안 들고 오히려 빈 이미지에서 크게 움직였다 | ✅ **맞다** |
+> | 음성 비중 | 4% | 32.3% |
+> | 해석 | OOD 혼란 | **조건부 판별 학습됨** |
+>
+> **배율이 작아진 것은 나빠진 것이 아니다.** v1 의 큰 배율은 "낯선 입력에 크게 흔들린" 것이었고,
+> v2 는 흔들림(`within` 1.06 → 0.49)이 절반 이하로 줄어든 위에서 신호만 남았다.
+> 즉 v2 는 **음성 데이터를 21 ep 늘린 것이 실제로 효과가 있었다**는 증거다.
+
+**다만 최종 확인은 실기다.** 위는 latent 공간의 부호이지 "실제로 팔이 올라가는가"가 아니다.
+시뮬 렌더링은 실사와 시각 격차가 커서 이 질문에 답이 안 되므로, v2 에서는 MuJoCo sim2sim(STEP 7)을
+건너뛰고 실기로 갔고 **실기에서 세 체크포인트 모두 과제를 수행했다**([5번 문서](5_deploy.md#2026-08-07-실기-결과)).
+
+<details>
+<summary>위 표를 다시 계산하는 법 (GPU 불필요)</summary>
+
+```bash
+SC=scratchpad
+for d in v2_ck2000 v2_ck18000 v2_ck24000; do
+  rsync -az kist-5090:/home/ltw1203/cross_cond/$d $SC/cross_cond/
+done
+```
+
+`records.json` 의 각 행이 `{base, src, frame, cond, base_ep, src_ep, base_kind, src_kind}` 이고
+`cond` 가 `self`/`within`/`cross` 다. 같은 `(base, frame)` 의 `self` 토큰을 기준으로
+`tok_b{base}_s{src}_t{frame}.npy` 와의 거리를 재서 `cond` 별로 평균하면 된다.
+(numpy 만 있으면 되므로 `.venv_data_collection` 으로도 돌아간다.)
+</details>
 
 ---
 
@@ -400,25 +485,41 @@ eval_results/decoded_openloop_v2_h10/
 
 ### ★ 그림과 `decoded.npz` 는 git 에 없다 — 클론하면 안 보인다
 
-[.gitignore:223](../.gitignore#L223) 에서 의도적으로 제외한다. 추적하는 것은
+[.gitignore:225-228](../.gitignore#L225-L228) 에서 의도적으로 제외한다. 추적하는 것은
 **분석 문서(`.md`)와 지표(`.csv`/`.tsv`)뿐**이다.
 
 ```
 eval_results/**/*.png    ← checkpoint_sweep.png, rightarm_only/, all29/ 전부 제외
+eval_results/**/*.jpeg
 eval_results/**/*.npz    ← decoded.npz 도 제외
+eval_results/**/*.mp4
 ```
 
-그래서 **README 가 설명하는 그림을 인계받은 사람은 볼 수 없다.** 다시 만들려면 아래
-사슬 중 어디까지 남아 있는지에 따라 비용이 달라진다:
+`git ls-files eval_results/` 로 실제 추적 대상을 확인할 수 있다 — v2 폴더는
+`README.md`, `metrics.csv`, `valloss.tsv` **3개뿐**이다.
+
+### 2026-08-07 현재 어디에 무엇이 살아 있는가
+
+| 자산 | 위치 | 상태 |
+|---|---|---|
+| `decoded.npz` (10.9MB) | DGX 로컬 `eval_results/decoded_openloop_v2_h10/` | ✅ **있다** (git 에는 없음) |
+| `checkpoint_sweep.png` | 같은 곳 | ✅ 있다 |
+| `rightarm_only/` · `all29/` | 같은 곳 | ✅ 각 **42장** (ck 2000·18000·24000 × 14 ep) |
+| 예측 토큰 `preds_h10/` | 서버 `~/eval_v2/preds_h10/` | ✅ **7.5MB / 19 ckpt — 지우지 말 것** |
+| 체크포인트 48개 | 서버 `~/groot_output/rab-v2b-20260806/` | ✅ 1.6TB |
+| `onnxenv` (디코드·플롯 실행환경) | — | ❌ **없다** → [§1-1](#1-1-로컬-venv-onnxenv) 로 재생성 |
+
+**즉 지금 필요한 것은 `onnxenv` 재생성뿐이고, 그 뒤 플롯은 수 초면 다시 나온다.**
+클론만 받은 사람은 아래 사슬 중 어디까지 남아 있는지에 따라 비용이 달라진다:
 
 | 남아 있는 것 | 필요한 작업 | 비용 |
 |---|---|---|
-| 로컬에 `decoded.npz` | STEP 4 플롯만 | **수 초** |
+| 로컬에 `decoded.npz` | onnxenv 재생성 + STEP 4 플롯 | **수 초** (설치 제외) |
 | 서버에 `~/eval_v2/preds_h10/` | STEP 2 rsync → STEP 3 디코드 → STEP 4 | 수 분 (CPU) |
-| 체크포인트만 | STEP 1 덤프부터 전부 | **~2시간 (GPU)** |
+| 체크포인트만 | STEP 1 덤프부터 전부 | **~50분 (GPU, 19개 기준)** |
 
-> **먼저 확인할 것**: `ssh kist-5090 'du -sh ~/eval_v2/preds_h10 2>/dev/null; ls ~/eval_v2/preds_h10 | head'`
-> 예측 토큰 npz 는 개당 ~30KB 라 전부 합쳐도 작다. **남아 있으면 지우지 말 것.**
+> **먼저 확인할 것**: `ssh kist-5090 'du -sh ~/eval_v2/preds_h10; ls ~/eval_v2/preds_h10'`
+> 예측 토큰 npz 는 개당 ~30KB 라 19 체크포인트 전부 합쳐 7.5MB 다. **남아 있으면 지우지 말 것.**
 
 ---
 
@@ -476,7 +577,9 @@ C++ **내부** 상태와 **ZMQ 로 내보낸** 값(=데이터셋 기록값)이 �
 |---|---|
 | 덤프 중 val 로더가 죽음 | val 셋에 `meta/stats.json` 없음 → `gr00t/data/stats.py` 로 생성 |
 | 401 `Cosmos-Reason2-2B` | `source ~/groot_env.sh` 누락 ([3번 문서 §0-3](3_finetune_groot_n17.md#0-3--groot_envsh--모든-명령-앞에-붙는다)) |
-| 플롯이 1,344장 쏟아짐 | `--checkpoints` 미지정 |
+| 플롯이 532장 쏟아짐 | `--checkpoints` 미지정 |
+| **v1 폴더의 그림이 바뀌어 있음** | `plot_decoded_openloop.py` 의 `--decoded`/`--out` 미지정 → **기본값이 v1 경로다** ([§5](#5-step-4--3곡선-플롯-)) |
+| `onnxruntime` 모듈 없음 | `onnxenv` 가 지금 없다 → [§1-1](#1-1-로컬-venv-onnxenv) 로 재생성 |
 | 음성 에피소드 RMSE 가 매우 낮음 | **정상** — 안 움직이는 게 정답이다. 성능 판단은 **양성만**으로 |
 | 지표가 이상하게 좋음 | `NEGATIVE_EPISODES` 미갱신으로 음성이 섞임 |
 | 빨강이 회색을 못 따라감 | **정상** — 빨강의 기준은 파랑이다. 회색과의 간격은 PD 감쇠(×0.82) |

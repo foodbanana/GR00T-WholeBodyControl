@@ -57,16 +57,29 @@ ssh kist-5090 'hostname; whoami'   # 무암호로 RTX5090 / ltw1203 이면 성�
 
 | | 경로 | 비고 |
 |---|---|---|
-| v1 계획 (`server_finetune_runbook.md`) | `/data/data2/ltw1203/gr00t/{Isaac-GR00T,dataset,hf_cache,output}` | cluster101 **로컬 디스크** 8TB. 런북은 NFS 홈을 피하라고 권고 |
-| **v2 실제** ✅ | `~/Isaac-GR00T`, `~/dataset/`, `~/hf_cache/`, `~/groot_output/` | **홈**. 용량 여유가 있어 여기에 두었다 |
+| v1 계획 (`server_finetune_runbook.md`) | `/data/data2/ltw1203/gr00t/{Isaac-GR00T,dataset,hf_cache,output}` | cluster101 **로컬 디스크**. 런북은 NFS 홈을 피하라고 권고 |
+| **v2 실제** ✅ | `~/Isaac-GR00T`, `~/dataset/`, `~/hf_cache/`, `~/groot_output/` | **홈(NFS)**. 아래 이유로 여기가 맞다 |
+| 예외 (실제로 `/data/data2` 를 쓰는 것) | `~/groot_env.sh` 가 지정하는 `torch_ext`, `triton_cache` | 컴파일 캐시만 로컬 디스크 |
 
 **현재 서버에 있는 실물은 홈 경로다.** 이 문서는 그 기준으로 쓴다.
 
-> ⚠️ **다음 학습 때 판단할 것.** `/home` 은 cluster100 에서 NFS 마운트한 공유 홈이다.
-> 런북이 "대용량 체크포인트/데이터를 여기 두면 느리고 공용 쿼터를 먹는다,
-> dataloader 가 정지/지연되면 데이터가 NFS 홈에 있는지부터 확인하라"고 경고한 경로다.
-> v2 에서는 문제없이 돌았지만, 데이터가 커지면 `/data/data2` 로 옮기는 것을 검토한다.
-> (`/data/data1` 은 `user:user` 소유라 **쓰기 불가**, `/data/data2` 만 쓰기 가능하다.)
+### 📌 런북의 "`/data/data2` 로 옮겨라" 권고는 이제 따를 수 없다 — 용량이 없다
+
+2026-08-07 실측:
+
+| 마운트 | 종류 | 크기 | 여유 | 판정 |
+|---|---|---|---|---|
+| `/home` | **NFS** (`192.168.135.100:/home`) | 28T | **12T** | ✅ 유일한 현실적 선택 |
+| `/data/data2` | 로컬 NVMe | 7.3T | **159G (98% 사용)** | ❌ 체크포인트가 안 들어간다 |
+| `/data/data1` | 로컬 NVMe | 3.6T | 320G (91%) | ❌ `user:user` 소유, **쓰기 불가** |
+
+`rab-v2b-20260806` 한 run 의 체크포인트만 **1.6TB** 다. `/data/data2` 의 여유 159G 로는
+run 하나도 못 담는다. **홈에 둔 것은 용량 때문에 강제된 선택이었고, 지금도 그렇다.**
+
+> ⚠️ 대신 NFS 리스크는 그대로 안고 간다. **dataloader 가 정지/지연되면 NFS 를 먼저 의심할 것.**
+> v2(65 ep / 12,383 frame)에서는 문제가 없었지만 데이터가 몇 배로 커지면 다시 볼 문제다.
+> 그때 선택지는 `/data/data2` 정리(남의 것이 대부분이므로 **함부로 지우지 말 것**) 또는
+> 데이터셋만 로컬 디스크에 두고 체크포인트는 홈에 쓰는 분리 배치다.
 
 ### 0-3. ★ `~/groot_env.sh` — 모든 명령 앞에 붙는다
 
@@ -93,13 +106,36 @@ which is a gated Hugging Face repo.
 > **`--model-path` 가 로컬 경로여도 백본만은 항상 HF 를 탄다.** 2026-08-07 실제로 확인했다.
 > 이 함정은 [5번 문서](5_deploy.md) 의 PolicyServer 기동에서도 똑같이 나온다.
 
-같이 잡아두면 좋은 것들 (`~/.bashrc` 또는 `groot_env.sh`):
+### `~/groot_env.sh` 전문 (2026-08-07 서버 실물)
 
 ```bash
 export HF_HOME=/home/ltw1203/hf_cache
-export HF_HUB_DISABLE_XET=1                        # ← 없으면 다운로드가 KB/s 로 떨어진다
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export HF_HUB_DISABLE_XET=1
+export TORCH_EXTENSIONS_DIR=/data/data2/ltw1203/torch_ext
+export TRITON_CACHE_DIR=/data/data2/ltw1203/triton_cache
+export PATH="$HOME/.local/bin:$PATH"
+
+# torchcodec 0.8.0 이 요구하는 FFmpeg 7 공유 라이브러리
+export LD_LIBRARY_PATH=/home/ltw1203/ffmpeg7/lib:$LD_LIBRARY_PATH
+
+# 기관 TLS 가로채기(SOOSAN ePrism) 대응
+export UV_SYSTEM_CERTS=1
+export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 ```
+
+**HF_HOME 말고도 빠지면 죽는 줄이 셋 더 있다:**
+
+| 줄 | 빠지면 |
+|---|---|
+| `HF_HOME` | gated 백본 **401** (위 참조) |
+| `LD_LIBRARY_PATH` (ffmpeg7) | torchcodec 이 `.so` 를 못 찾아 **비디오 디코드 실패** → 데이터셋 로딩 단계에서 죽는다 |
+| `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE`/`UV_SYSTEM_CERTS` | 기관 방화벽이 TLS 를 가로채므로 **HF·PyPI 다운로드가 인증서 오류**로 실패 |
+| `TORCH_EXTENSIONS_DIR`/`TRITON_CACHE_DIR` | 컴파일 캐시가 NFS 홈에 쌓여 느려진다 (치명적이진 않다) |
+
+> **이 파일 자체를 백업해 둘 것.** 서버 홈이 날아가면 위 네 가지를 처음부터 다시 알아내야 한다.
+> `HF_HUB_DISABLE_XET=1` 은 없으면 다운로드가 KB/s 로 떨어져 "멈춘 것처럼" 보인다.
 
 ---
 
@@ -244,7 +280,8 @@ DGX Spark 에서 실행한다 ([2번 문서](2_dataset_preprocess_merge.md) 산�
 
 ```bash
 rsync -avhP --stats \
-  ~/GR00T-WholeBodyControl/outputs/raise_arm_banana_merged \
+  ~/GR00T-WholeBodyControl/outputs/raise_arm_banana_v2_train \
+  ~/GR00T-WholeBodyControl/outputs/raise_arm_banana_v2_val \
   kist-5090:~/dataset/
 ```
 
@@ -252,7 +289,7 @@ rsync -avhP --stats \
 
 ```bash
 ssh kist-5090 'bash -s' <<'EOF'
-D=~/dataset/raise_arm_banana_merged
+D=~/dataset/raise_arm_banana_v2_train
 du -sh $D
 echo "parquet: $(ls $D/data/chunk-000 | wc -l)"
 echo "mp4    : $(ls $D/videos/chunk-000/observation.images.ego_view | wc -l)"
@@ -281,7 +318,7 @@ export CUDA_VISIBLE_DEVICES=0
 
 uv run python gr00t/experiment/launch_finetune.py \
     --base-model-path nvidia/GR00T-N1.7-3B \
-    --dataset-path ~/dataset/raise_arm_banana_merged \
+    --dataset-path ~/dataset/raise_arm_banana_v2_train \
     --embodiment-tag UNITREE_G1_SONIC \
     --modality-config-path gr00t/configs/data/embodiment_configs.py \
     --output-dir ~/groot_output/smoke_1gpu \
@@ -304,7 +341,7 @@ unset CUDA_VISIBLE_DEVICES
 
 uv run python gr00t/experiment/launch_finetune.py \
     --base-model-path nvidia/GR00T-N1.7-3B \
-    --dataset-path ~/dataset/raise_arm_banana_merged \
+    --dataset-path ~/dataset/raise_arm_banana_v2_train \
     --embodiment-tag UNITREE_G1_SONIC \
     --modality-config-path gr00t/configs/data/embodiment_configs.py \
     --output-dir ~/groot_output/smoke_4gpu \
@@ -349,8 +386,6 @@ tmux 안에서:
 source ~/groot_env.sh
 cd ~/Isaac-GR00T
 unset CUDA_VISIBLE_DEVICES
-export WANDB_PROJECT=g1-sonic-raise-arm-banana
-export WANDB_NAME=rab-v2b-20260806
 
 uv run python gr00t/experiment/launch_finetune.py \
     --base-model-path nvidia/GR00T-N1.7-3B \
@@ -362,29 +397,61 @@ uv run python gr00t/experiment/launch_finetune.py \
     --global-batch-size 32 \
     --max-steps 24000 \
     --save-steps 500 \
+    --save-total-limit 48 \
     --color-jitter-params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08 \
     --dataloader-num-workers 4 \
-    --use-wandb 2>&1 | tee ~/train_rab_v2b.log
+    --val-dataset-path ~/dataset/raise_arm_banana_v2_val \
+    --val-eval-steps 200 \
+    --use-wandb --wandb-project groot-n17-sonic 2>&1 | tee ~/train_rab_v2b.log
 ```
 
 `Ctrl-b d` 로 detach, `tmux attach -t ft` 로 복귀.
 
-> ⚠️ **위 명령은 v2 산출물에서 역산한 재구성이다.** 확정된 값은 출력 경로
-> `~/groot_output/rab-v2b-20260806`, 로그 `~/train_rab_v2b.log`, `--max-steps 24000`,
-> `--save-steps 500`(체크포인트 48개), `--global-batch-size 32`, GPU 4장이다.
-> `--dataset-path` 의 정확한 폴더명, `--save-total-limit`, val/loss 를 켠 인자는
-> **서버에서 확인해 채워 넣을 것**:
-> `head -50 ~/train_rab_v2b.log` 또는 `grep -h "launch_finetune.py" ~/.bash_history | tail -5`
+> **위 값은 서버의 `~/groot_output/rab-v2b-20260806/experiment_cfg/conf.yaml` 에서 확인한
+> 실제 학습 설정이다** (2026-08-07 대조). 명령줄 자체는 로그에 안 남지만 conf.yaml 에
+> 최종 설정이 통째로 저장되므로, **다음에도 여기서 확인하면 된다.**
 
-### 첫 체크포인트 직후 반드시 확인 — 용량 폭주 방지
+<details>
+<summary>conf.yaml 에 기록된 나머지 설정 (기본값을 그대로 쓴 것들)</summary>
+
+| 항목 | 값 |
+|---|---|
+| learning_rate / scheduler | `1e-4` / `cosine`, `warmup_ratio 0.05` |
+| weight_decay / max_grad_norm | `1e-5` / `1.0` |
+| optim / 정밀도 | `adamw_torch` / `bf16` + `tf32` |
+| deepspeed_stage | `2` (ZeRO-2) |
+| tune_llm / tune_visual | `false` / `false` — **VLM 백본은 얼려 둔다** |
+| tune_projector / tune_diffusion_model / tune_vlln | 전부 `true` |
+| action_horizon | `40` ← 실기 chunk 크기와 같다 |
+| num_inference_timesteps | `4` (denoising steps) |
+| image_crop_size / image_target_size | `230x230` / `256x256` |
+| eval_strategy | `'no'` — val/loss 는 HF eval 이 아니라 `--val-dataset-path` 경로로 나온다 |
+| val_eval_steps / val_samples_per_episode | `200` / `8` → **24000/200 = 120개** 기록 |
+
+</details>
+
+### 📌 `--save-only-model` 을 쓰지 않았다 — 체크포인트가 **1.6TB** 다
+
+conf.yaml 의 `save_only_model: false`. 즉 48개 체크포인트에 **DeepSpeed 옵티마이저 상태가
+전부 포함**돼 있다. 실측 `du -sh ~/groot_output/rab-v2b-20260806` = **1.6TB** (홈 여유 12T).
+
+| | 크기 | 용도 |
+|---|---|---|
+| 체크포인트 1개 전체 | ~34GB | 중단 후 **재개** 가능 |
+| 그중 추론에 필요한 부분 | **6.5GB** | `global_step*/` (옵티마이저)를 뺀 나머지 |
+
+추론용으로 내려받을 때는 6.5GB 만 받으면 된다 ([5번 문서 §1](5_deploy.md#1-사전-조건)).
+다만 `statistics.json` 과 `experiment_cfg/` 는 **정규화·모달리티 설정이라 빼면 출력이 망가진다.**
+
+**첫 체크포인트 직후 반드시 크기를 확인한다:**
 
 ```bash
-ssh kist-5090 'du -sh ~/groot_output/rab-v2b-20260806/checkpoint-500; df -h /home'
+ssh kist-5090 'du -sh ~/groot_output/<run>/checkpoint-500; df -h /home'
 ```
 
-`--save-only-model` 을 **넣지 않으면** 체크포인트에 옵티마이저 상태가 포함돼 하나에 수십 GB 가 된다
-(중단 후 재개하려면 필요하다). 48개를 남기는 설정이므로 첫 저장 직후 실제 크기를 보고
-`--save-total-limit` 을 정한다.
+디스크가 빠듯하면 `--save-only-model` 을 넣거나 `--save-total-limit` 을 줄인다.
+단 `--save-only-model` 을 넣으면 **중단 후 재개가 불가능**해진다 — 24000 step 이 12시간대
+작업이므로 트레이드오프를 알고 고를 것.
 
 ### 플래그 선택 근거
 
@@ -416,7 +483,8 @@ ssh kist-5090 'watch -n5 nvidia-smi'
 ssh kist-5090 'ls ~/groot_output/rab-v2b-20260806/ | grep checkpoint | sort -t- -k2 -n | tr "\n" " "'
 ```
 
-wandb: `https://wandb.ai/<계정>/g1-sonic-raise-arm-banana`
+wandb 프로젝트는 **`groot-n17-sonic`**, run 이름은 `rab-v2b-20260806` 이다
+(`wandb_project` 는 conf.yaml 로 확인. 계정은 `twvirus7338`).
 
 **중단 판단**
 - 초반 수백 step 에서 loss 가 평평하거나 NaN → **즉시 중단**, 데이터/정규화 경로 점검
@@ -429,7 +497,9 @@ step 24000  val/loss = 0.222094
 ```
 
 > **로그 키는 `val/loss` 다.** `eval_loss` 로 grep 하면 0건이라 "없다"고 오판하기 쉽다.
-> v2 는 200 step 간격으로 120개가 기록됐다
+> conf.yaml 의 `eval_strategy: 'no'` 때문이다 — 이 값은 HuggingFace 기본 eval 을 끈 것이고,
+> val/loss 는 `--val-dataset-path` + `--val-eval-steps 200` 경로로 따로 계산돼 로그에만 찍힌다.
+> v2 는 24000/200 = **120개**가 기록됐다
 > ([eval_results/decoded_openloop_v2_h10/valloss.tsv](../eval_results/decoded_openloop_v2_h10/valloss.tsv)).
 
 ### 학습 완료 체크

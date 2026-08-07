@@ -45,7 +45,8 @@
 | 데이터를 새로 찍는다 | [1_data_collection.md](1_data_collection.md) |
 | 모델이 이상하게 움직인다 | [5_deploy.md §8 이상 징후](5_deploy.md#8-이상-징후) |
 | 어느 체크포인트를 쓸지 모르겠다 | [4_evaluation.md §8](4_evaluation.md#8-v2-결과--읽고-넘어가야-할-세-가지) — **val/loss 로 고르면 안 된다** |
-| 그래프를 다시 뽑아야 한다 | [4_evaluation.md §5](4_evaluation.md#5-step-4--3곡선-플롯-) |
+| 그래프를 다시 뽑아야 한다 | [4_evaluation.md §5](4_evaluation.md#5-step-4--3곡선-플롯-) — 먼저 [§1-1 onnxenv](4_evaluation.md#1-1-로컬-venv-onnxenv) 재생성 |
+| 무엇이 검증됐고 무엇이 안 됐나 | [5_deploy.md §9 알려진 한계](5_deploy.md#9-알려진-한계--여기까지가-검증된-범위다) |
 
 ## 인계받는 사람이 먼저 알아야 할 다섯 가지
 
@@ -59,12 +60,25 @@
    [4번 문서](4_evaluation.md)의 관절공간 평가로 고른다.
 5. **체크포인트를 바꿀 때는 VLA 추론 터미널도 재시작한다** — 안 하면 이전 세션 토큰이 남아
    초기 자세가 달라진다.
+6. **학습 데이터는 전부 head-only 다** — `ego_view` 1대뿐이고 손목 카메라가 들어간 적이 없다.
+   3-cam 절차는 손목을 다시 붙일 때 쓰는 것이고, 그때는 **모델을 처음부터 다시 학습해야 한다.**
+
+## 현재 상태 (2026-08-07)
+
+**파이프라인 1회전 완료.** 수집 → 병합(79 ep) → 파인튜닝(24000 step) → 관절공간 평가(19 ckpt)
+→ 실기 구동까지 끝났고, 실기에서 ck2000·ck8000·ck18000 **셋 다 과제를 수행**했다.
+교차조건 테스트에서도 이미지만 바꿨을 때 토큰이 **기대 방향으로 100% 갈렸다**
+([4_evaluation.md §7](4_evaluation.md#-v2-결과--돌았고-v1-의-실패가-뒤집혔다)) — v1 에서
+방향이 반대로 나왔던 문제가 해결됐다.
+
+검증된 범위의 경계는 [5_deploy.md §9](5_deploy.md#9-알려진-한계--여기까지가-검증된-범위다) 에 있다.
+로봇은 현재 전원 off 이고, 그 외 실기 자산(바이너리·venv·터널·체크포인트 48개)은 전부 살아 있다.
 
 ## 저장소 구조가 두 브랜치로 갈려 있다
 
 | 브랜치 | 들어 있는 것 |
 |---|---|
-| **`3cam-pipeline`** (이 브랜치) | 인수인계 문서 5개, 평가/추론 스크립트(`wbc_decoder.py`, `eval_decoded_*.py`, `plot_*.py`, `split_dataset.py`, `smoke_test_policy_server.py`, `keyboard_publisher.py`) |
+| **`3cam-pipeline`** (이 브랜치) | 인수인계 문서 5개, 평가/추론 스크립트(`wbc_decoder.py`, `eval_decoded_*.py`, `plot_*.py`, `split_dataset.py`, `dump_open_loop_predictions.py`, `cross_condition_test.py`, `smoke_test_policy_server.py`, `keyboard_publisher.py`) |
 | `3cam-data-collection` | 데이터 수집 원본 문서 `data_collection.md` (635줄) |
 
 수집 문서 원본을 보려면:

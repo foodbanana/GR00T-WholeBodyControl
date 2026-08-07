@@ -170,6 +170,31 @@ python gear_sonic/scripts/process_dataset.py \
 - 세션 폴더는 수집 시각 자동 이름(`2026-07-22-11-09-30`) 대신 `--dataset-name` 으로
   `raise_arm_banana_01` 처럼 붙여두면 이렇게 나열하기 쉽다
 
+### v2 `raise_arm_banana_merged_v2`(79 ep) — v1 병합본에 음성 2세션을 얹었다
+
+v2 는 원본 10세션부터 다시 병합한 것이 **아니다.** 이미 만들어 둔 v1 병합본에
+2026-08-06 에 추가 수집한 **음성 전용 2세션**을 이어 붙였다:
+
+```bash
+python gear_sonic/scripts/process_dataset.py \
+    --dataset-path outputs/raise_arm_banana_merged \
+                   outputs/2026-08-06-20-55-58 \
+                   outputs/2026-08-06-21-05-31 \
+    --output-path outputs/raise_arm_banana_merged_v2 \
+    --no-remove-stale-smpl
+```
+
+| 입력 | ep | frame | 내용 |
+|---|---|---|---|
+| `raise_arm_banana_merged` (v1) | 55 | 11,208 | ep0~54 |
+| `2026-08-06-20-55-58` | 13 | 2,057 | 신규 음성 → ep55~67 |
+| `2026-08-06-21-05-31` | 11 | 1,636 | 신규 음성 → ep68~78 |
+| **= `raise_arm_banana_merged_v2`** | **79** | **14,901** | fps 25, `ego_view` 1대 |
+
+**입력 순서가 곧 `episode_index` 순서**라 신규 음성이 정확히 ep55~78 에 놓였고,
+그래서 [`NEGATIVE_EPISODES`](../gear_sonic/scripts/wbc_decoder.py) 가 `{4,9,49} ∪ {55..78}` 이다.
+**순서를 바꿔 병합하면 이 상수가 통째로 틀어진다.**
+
 세션이 많으면 목록 파일로:
 
 ```bash
@@ -270,6 +295,24 @@ EOF
 
 ## STEP 5 — train / val 분할
 
+**v2 를 만든 실제 명령** (val 14개는 양성·음성이 고르게 섞이도록 골랐다):
+
+```bash
+python gear_sonic/scripts/split_dataset.py \
+    --source     outputs/raise_arm_banana_merged_v2 \
+    --out-train  outputs/raise_arm_banana_v2_train \
+    --out-val    outputs/raise_arm_banana_v2_val \
+    --val-episodes 12 24 36 47 49 50 51 52 53 57 61 66 70 75
+```
+
+| 산출물 | ep | frame | 원본 `episode_index` |
+|---|---|---|---|
+| `raise_arm_banana_v2_train` | 65 | 12,383 | 나머지 전부 |
+| `raise_arm_banana_v2_val` | 14 | 2,518 | 12, 24, 36, 47, 49, 50, 51, 52, 53, 57, 61, 66, 70, 75 |
+
+<details>
+<summary>v1 분할 (참고)</summary>
+
 ```bash
 python gear_sonic/scripts/split_dataset.py \
     --source     outputs/raise_arm_banana_merged \
@@ -277,6 +320,10 @@ python gear_sonic/scripts/split_dataset.py \
     --out-val    outputs/raise_arm_banana_val5 \
     --val-episodes 49 50 51 52 53
 ```
+
+train50 = ep 0~48 + **54** (50 ep / 10,330 frame), val5 = ep 49~53 (5 ep / 878 frame).
+**마지막 5개가 아니라 49~53 이고 54 는 train 에 남는다.**
+</details>
 
 | 옵션 | 설명 |
 |---|---|
@@ -295,11 +342,29 @@ python gear_sonic/scripts/split_dataset.py \
 
 | 용도 | 필요 여부 |
 |---|---|
-| **학습**(train 셋) | 자동. `launch_finetune.py` 가 데이터셋을 처음 로드할 때 생성한다 |
-| **평가**(val 셋, 예측 토큰 덤프) | ⚠️ **미리 만들어야 한다.** 없으면 로더가 죽는다 → 서버에서 `gr00t/data/stats.py` 로 생성 |
+| **학습**(train 셋) | 있으면 그대로 쓴다 |
+| **평가**(val 셋, 예측 토큰 덤프) | ⚠️ **미리 만들어야 한다.** 없으면 로더가 죽는다 |
 
-v2 에서는 val 셋의 `meta/stats.json` 을 학습 전에 만들어 두었다. 새 데이터셋으로 평가를
-돌릴 때 이 단계를 빠뜨리면 [4번 문서](4_evaluation.md) STEP 1 에서 막힌다.
+**서버로 전송한 뒤 서버에서 만든다** — `gr00t/data/stats.py` 는 `tyro` CLI 다:
+
+```bash
+ssh kist-5090
+source ~/groot_env.sh
+cd ~/Isaac-GR00T
+for D in raise_arm_banana_v2_train raise_arm_banana_v2_val; do
+  uv run python gr00t/data/stats.py \
+      --dataset-path ~/dataset/$D \
+      --embodiment-tag UNITREE_G1_SONIC \
+      --modality-config-path gr00t/configs/data/embodiment_configs.py
+done
+```
+
+`stats.json` 과 `relative_stats.json` 두 개가 생긴다.
+`--modality-config-path` 는 **필수다** — `UNITREE_G1_SONIC` 은 내장 태그가 아니라
+빼면 `No built-in modality config for embodiment tag ...` 로 죽는다.
+
+v2 에서는 학습 시작(22:39) 전인 **21:21~21:22 에 train·val 둘 다** 만들어 두었다.
+새 데이터셋으로 평가를 돌릴 때 이 단계를 빠뜨리면 [4번 문서](4_evaluation.md) STEP 1 에서 막힌다.
 
 ### 양성/음성 에피소드 목록 관리
 
@@ -316,11 +381,17 @@ v2 에서는 val 셋의 `meta/stats.json` 을 학습 전에 만들어 두었다.
 
 ## STEP 6 — GPU 서버로 전송
 
+**train 과 val 을 둘 다 올린다.** 서버 작업 루트는 `/data/data2` 가 아니라 **홈**이다
+([3번 문서 §0-2](3_finetune_groot_n17.md#0-2-작업-경로--v1-계획과-v2-실제가-다르다)):
+
 ```bash
 rsync -avhP --stats \
-  ~/GR00T-WholeBodyControl/outputs/raise_arm_banana_merged \
-  kist-5090:/data/data2/ltw1203/gr00t/dataset/
+  ~/GR00T-WholeBodyControl/outputs/raise_arm_banana_v2_train \
+  ~/GR00T-WholeBodyControl/outputs/raise_arm_banana_v2_val \
+  kist-5090:~/dataset/
 ```
+
+전송이 끝나면 **서버에서 `stats.json` 을 만든다** ([STEP 5](#-metastatsjson--언제-필요한가)).
 
 이후는 [3. GR00T N1.7 파인튜닝](3_finetune_groot_n17.md) 으로.
 
