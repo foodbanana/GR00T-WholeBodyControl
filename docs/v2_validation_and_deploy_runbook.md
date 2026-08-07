@@ -145,7 +145,18 @@ v1 결과: cross가 within의 2.4~2.8배로 갈렸으나 **방향이 반대**였
 넣어도 팔을 안 들고 오히려 빈 이미지에서 크게 움직임). 음성 4%로는 학습 불가라는
 결론이었고, v2는 32%다.
 
-## STEP 7 — MuJoCo sim2sim 폐루프 (NVIDIA 구현)
+## STEP 7 — MuJoCo sim2sim 폐루프 (NVIDIA 구현) — ⏭️ **생략 (2026-08-07)**
+
+> **박사님 판단으로 STEP 7 은 건너뛰고 STEP 8 실기로 바로 간다.**
+> 근거: 시뮬 렌더링이 실사와 시각 격차가 커서, 이 과제의 핵심 질문인
+> "바나나를 보고 판별하는가"를 sim 에서 확인해봐야 현실과 다르다.
+> (아래 "미반영 항목" 표의 *바나나 판별 최종 검증* 항목과 같은 이유다.)
+>
+> **다만 sim2sim 이 걸러주던 것 하나가 빠진다 — "넘어지지 않는가".**
+> 그 몫은 STEP 8 첫 구동에서 **사람이 붙잡을 수 있는 상태 + `p` 즉시 정지 대기**로
+> 대신한다. [8-8 안전](#8-8-안전) 을 반드시 지킬 것.
+>
+> 아래 절차는 나중에 필요해질 때를 위해 남겨둔다.
 
 **NVIDIA 개발자들이 만든 `run_sim_loop.py` 를 쓴다.** 이것이 실기와 같은 구조의
 진짜 폐루프다 — MuJoCo가 카메라를 렌더링해 ZMQ로 발행하고, VLA가 그 영상을 보고
@@ -215,46 +226,147 @@ tmux 를 쓰지 않는다면 [STEP 8](#step-8--실기-배포) 의 수동 터미�
 
 ## 8-0. 사전 조건
 
-| 항목 | 상태 (2026-08-06 확인) | 조치 |
+| 항목 | 상태 (2026-08-07 확인) | 조치 |
 |---|---|---|
 | C++ deploy 바이너리 | ✅ **빌드됨** — `gear_sonic_deploy/target/release/g1_deploy_onnx_ref` (2026-07-23) | 없음 |
-| **`.venv_inference`** | ❌ **없음** | `bash install_scripts/install_inference.sh` |
-| PolicyServer 구동 위치 | 미정 | 8-1 참조 |
+| **`.venv_inference`** | ✅ **설치됨** — `gr00t` import OK, torch 2.9.0+cu128, `cuda.is_available()=True` | 없음 |
+| PolicyServer 구동 위치 | ✅ **안 B (KIST 서버 원격) 확정** — 2026-08-07 변경 | 8-1 참조 |
+| 체크포인트 | ck2000 / ck8000 / ck18000 세 개를 서버에서 CLI 로 갈아끼운다 | 8-2 참조 |
+| SSH 터널 | ✅ **연결됨** — `localhost:5551 → kist-5090:5550` | 8-1 참조 |
 | 카메라 서버 | 로봇 전원 필요 | 로봇 온보드에서 docker 실행 |
-| 로봇 네트워크 | 미도달(전원 off) | `ping 192.168.123.164` |
+| 로봇 네트워크 | 미도달(전원 off, 2026-08-07 ping 무응답) | `ping 192.168.123.164` |
 
-`.venv_inference` 설치는 **로봇 없이 미리** 해둘 수 있다. 당일 시간을 아끼려면 먼저 할 것.
+위 4개는 **로봇 없이 미리** 끝낼 수 있다. 로봇 전원이 올라오면 남는 건 카메라 서버뿐이다.
 
-## 8-1. PolicyServer 를 어디서 돌릴 것인가 — 결정 필요
+## 8-1. PolicyServer 를 어디서 돌릴 것인가 — ✅ **안 B (원격) 확정**
 
 | 안 | 장점 | 문제 |
 |---|---|---|
-| **A. DGX Spark(로컬)** | 네트워크 지연 없음 | **aarch64(ARM64) + GB10** 이라 Isaac-GR00T 의존성 설치 미검증. 로컬 `~/Isaac-GR00T` 는 clone 만 되어 있고 `.venv` 없음 |
-| **B. KIST 서버** | 이미 설치·검증됨 | 원격이라 네트워크 지연이 추론 지연에 더해짐. SSH 터널 필요 |
+| A. DGX Spark(로컬) | 네트워크 지연 없음 | 체크포인트마다 6.5GB 를 내려받아야 하고, GB10 한 장을 추론이 점유한다 |
+| **B. KIST 서버(원격)** ✅ | 체크포인트가 이미 서버에 다 있어 **CLI 로 즉시 교체**. GPU 4장 | 네트워크 지연 — **아래에서 해결됨** |
 
-**A 를 먼저 시도**하고 안 되면 B. A 검증:
+**B 로 간다.** ck2000/ck8000/ck18000 을 번갈아 비교하는 것이 목적이라,
+매번 6.5GB 를 내려받는 대신 서버에서 `--ckpt` 만 바꾸는 쪽이 맞다.
 
-```bash
-cd ~/Isaac-GR00T && uv sync --all-extras
-uv run python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
-```
+### 서버에서 띄우기 — NVIDIA 공식 명령어 + 한 줄
 
-B 로 갈 경우 터널을 켜둔 채로 둔다:
-
-```bash
-ssh -N -L 5550:localhost:5550 kist-5090
-```
-
-## 8-2. 체크포인트 준비
-
-STEP 1에서 고른 **val/loss 최저 체크포인트**를 쓴다.
+**래퍼 스크립트를 쓰지 않는다.** `run_gr00t_server.py` 의 `--model-path` 가 이미
+체크포인트를 고르는 CLI 인자다. 공식 문서 명령어를 그대로 쓰되,
+**이 서버에서는 앞에 `source ~/groot_env.sh` 가 반드시 필요하다** (이유는 바로 아래).
 
 ```bash
-CKPT=/home/ltw1203/groot_output/rab-v2b-20260806/checkpoint-<best>
+ssh kist-5090
+tmux new -s policy                      # SSH 를 닫아도 살아 있게
 
-# A(로컬)로 가져올 때 — 34GB
-rsync -avhP kist-5090:$CKPT ~/models/
+source ~/groot_env.sh                   # ★ 없으면 아래에서 401 로 죽는다
+cd ~/Isaac-GR00T
+uv run python gr00t/eval/run_gr00t_server.py \
+    --model-path ~/groot_output/rab-v2b-20260806/checkpoint-2000 \
+    --embodiment-tag UNITREE_G1_SONIC \
+    --device cuda:0 \
+    --port 5550
 ```
+
+체크포인트 교체는 `Ctrl+C` 로 끄고 `--model-path` 의 숫자만 바꿔 다시 띄운다
+(같은 포트를 두 번 bind 할 수 없다). 붙었다 떨어지기: `Ctrl+b d` / `tmux a -t policy`.
+
+가능한 체크포인트 목록:
+
+```bash
+ls -d ~/groot_output/rab-v2b-20260806/checkpoint-* | sed 's#.*checkpoint-##' | sort -n
+```
+
+### ★ 함정 — `source ~/groot_env.sh` 없이 공식 명령어만 치면 401 로 죽는다
+
+```
+RuntimeError: Cannot download the VLM backbone 'nvidia/Cosmos-Reason2-2B',
+which is a gated Hugging Face repo.
+401 Client Error ... Access to model nvidia/Cosmos-Reason2-2B is restricted.
+```
+
+GR00T 체크포인트는 **VLM 백본을 항상 별도로 로드**한다. 이 서버는 백본과 HF 토큰이
+`~/hf_cache` 에 있고, 그 경로는 `groot_env.sh` 의 `export HF_HOME=/home/ltw1203/hf_cache`
+로만 잡힌다.
+
+| 경로 | 내용 |
+|---|---|
+| `~/hf_cache/hub/` | `models--nvidia--Cosmos-Reason2-2B`, `models--nvidia--GR00T-N1.7-3B` + `token` ✅ |
+| `~/.cache/huggingface/` (HF 기본값) | **비어 있음, 토큰 없음** ❌ |
+
+`HF_HOME` 을 안 잡으면 HF 기본 경로를 보고 → 캐시 없음 → 다운로드 시도 →
+게이트 걸린 repo 라 401. 체크포인트 경로가 맞아도 죽는다.
+
+> `--model-path` 가 로컬 경로라 HF 를 안 탈 것 같지만 **아니다.** 백본만은 항상 HF 를 탄다.
+> 2026-08-07 실제로 확인함.
+
+### 로그를 남기고 싶으면
+
+```bash
+uv run python gr00t/eval/run_gr00t_server.py ... 2>&1 | tee ~/groot_output/policy_server_5550.log
+```
+
+### SSH 터널
+
+로컬 5550 은 이미 다른 서버가 쓸 수 있으므로 **5551 로 뺀다**:
+
+```bash
+ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 \
+    -L 5551:localhost:5550 kist-5090
+```
+
+클라이언트는 `--host localhost --port 5551` 로 붙는다.
+
+### 원격 지연 — 측정값과 그 결과 바뀐 것
+
+**전송량이 곧 지연이다.** 관측치는 msgpack 으로 **압축 없이 raw uint8** 로
+넘어가므로, 이미지 해상도가 왕복 시간을 그대로 결정한다.
+터널 너머 실측(2026-08-07, ck2000):
+
+| ego_view 해상도 | 전송량/회 | 2.5Hz 환산 | **왕복 시간** |
+|---|---|---|---|
+| 1920x1080 (기존 기본값) | 6.22 MB | 15.6 MB/s (124 Mbps) | **647 ms** ❌ |
+| 960x540 | 1.56 MB | 3.9 MB/s (31 Mbps) | 243 ms |
+| **640x480** ✅ | 0.92 MB | 2.3 MB/s (18 Mbps) | **192 ms** |
+
+2.5Hz 예산이 400ms 인데 **원본 해상도는 그것만으로 예산을 넘긴다.**
+
+`run_vla_inference.py` 는 원래 카메라를 `decode_reduce_factor=1`(1080p 원본)로
+읽어 그대로 보내고 있었다. 그래서 **보내기 전에 640x480 으로 줄이도록 고쳤다**:
+
+```
+--camera-decode-reduce 2      # 1080p -> 960x540 (libjpeg scaled decode)
+--camera-image-size 640x480   # -> 640x480 (INTER_AREA)
+```
+
+이 값이 새 기본값이고, `launch_inference.py` 에도 같은 인자를 뚫어놨다.
+
+이건 속도만의 문제가 아니다. **데이터 수집 때 `run_data_exporter.py` 가 쓴
+전처리 경로와 정확히 같다** (reduce 2 → `cv2.resize(..., INTER_AREA)` → 640x480,
+`meta/info.json` 의 `observation.images.ego_view` = `[480, 640, 3]`).
+원본을 그대로 보내면 학습 때와 다른 리샘플링을 거친 이미지를 모델에 주게 된다.
+
+## 8-2. 체크포인트 — ck2000 / ck8000 / ck18000 비교
+
+세 개를 **실기에서 직접 비교**한다. 서버에 다 있으므로 내려받을 것은 없다.
+`--model-path` 끝의 숫자만 바꾸면 된다 (서버 재기동 필요).
+
+```bash
+CK=~/groot_output/rab-v2b-20260806
+--model-path $CK/checkpoint-2000     # 초기 학습
+--model-path $CK/checkpoint-8000     # 중간
+--model-path $CK/checkpoint-18000    # 관절공간 최저
+```
+
+**사전 기대치는 ck18000 이다.**
+[`eval_results/decoded_openloop_v2_h10/README.md`](../eval_results/decoded_openloop_v2_h10/README.md)
+결론 2 에서 **val/loss 와 관절공간 성능의 상관이 −0.605 로 방향이 반대**임이
+확인됐다. val/loss 최저인 ck4000 은 관절공간에서 29.93° 로 거의 최악이고,
+ck18000 은 **양성 8ep 평균 23.02° 로 관절공간 최저**다.
+ck2000/ck8000 은 그 곡선의 앞쪽이라, 실기에서 정말 단조 개선인지 보는 용도다.
+
+> 로컬 `~/models/` 에도 ck2000/ck18000 사본이 있다(이전 세션 작업).
+> `ck8000` 은 **복사가 중간에 끊겨 shard 2 가 없다** — 로컬로 돌릴 생각이면
+> 먼저 다시 받아야 한다. 원격으로 가는 한 상관없다.
 
 ## 8-3. 구조도
 
@@ -346,15 +458,39 @@ ssh unitree@192.168.123.164
 # 로봇에서 docker/run_ltw_camera_server_ros2foxy_v8.sh 실행
 ```
 
-### Terminal 2 — PolicyServer (GPU 있는 곳)
+### Terminal 2 — PolicyServer (KIST 서버 원격) + SSH 터널
+
+**2-a. 서버에서 띄운다** (체크포인트는 `--model-path` 로 고른다):
 
 ```bash
+ssh kist-5090
+tmux new -s policy
+source ~/groot_env.sh                   # ★ 빠뜨리면 401 로 죽는다 (8-1 참조)
 cd ~/Isaac-GR00T
 uv run python gr00t/eval/run_gr00t_server.py \
-    --model-path <체크포인트 경로> \
+    --model-path ~/groot_output/rab-v2b-20260806/checkpoint-2000 \
     --embodiment-tag UNITREE_G1_SONIC \
-    --device cuda:0 --port 5550
+    --device cuda:0 \
+    --port 5550
 ```
+
+`Loading checkpoint shards: 100%` 가 뜨고 포트가 열리면 준비된 것이다
+(로드에 약 1분). `Ctrl+b d` 로 빠져나온다.
+
+**2-b. 로컬에서 터널을 연다** (5550 은 이미 쓰일 수 있어 **5551** 로):
+
+```bash
+ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 \
+    -L 5551:localhost:5550 kist-5090
+```
+
+> **`--port 5550` 을 빠뜨리면 안 된다.** `run_gr00t_server.py` 의 기본 포트는
+> **5555** 로, 카메라 서버와 같은 번호다. 반면 `run_vla_inference.py` 의
+> `--port` 기본값은 **5550** 이라, 서버만 기본값으로 띄우면 클라이언트가
+> 영영 붙지 못한다 (에러 없이 그냥 조용히 멈춘 것처럼 보인다).
+> 공식 문서 예시에도 `--port 5550` 이 명시돼 있다 — 그대로 따르면 된다.
+
+원격이므로 Terminal 5 는 `--host localhost --port 5551` 로 붙는다.
 
 ### Terminal 3 — C++ Deploy (DGX Spark)
 
@@ -391,19 +527,22 @@ C++ deploy 와 `run_vla_inference.py` 가 **둘 다 이 포트(5580)를 구독**
 cd ~/GR00T-WholeBodyControl
 source .venv_inference/bin/activate
 python gear_sonic/scripts/run_vla_inference.py \
-    --host <PolicyServer IP> --port 5550 \
+    --host localhost --port 5551 \
     --embodiment-tag unitree_g1_sonic \
     --prompt "raise your right arm if you see a banana" \
     --camera-host 192.168.123.164 --camera-port 5555 \
     --action-publish-rate 25 \
-    --chunk-blend-frames 3
+    --chunk-blend-frames 0 \
+    --camera-image-size 640x480 --camera-decode-reduce 2
 ```
 
 | 인자 | 공식 기본값 | **우리 값** | 이유 |
 |---|---|---|---|
 | `--action-publish-rate` | 50 | **25** | 모델이 **25fps** 데이터로 학습됐다. `delta_indices=range(40)` 이 데이터셋 프레임 40개 연속이라 리샘플링이 없어, 50이면 **동작이 2배 속도로 재생**된다 |
-| `--chunk-blend-frames` | (없음) | **3** | 우리가 추가한 옵션. chunk 경계에서 관절목표가 평균 20°(최대 204°) 튀는 것을 완화. 이상하면 `0` 으로 즉시 원복 |
+| `--chunk-blend-frames` | (없음) | **첫 구동 0 → 이후 3** | 우리가 추가한 옵션. chunk 경계에서 관절목표가 평균 20°(최대 204°) 튀는 것을 완화하지만 **하드웨어 미검증**이다. 검증된 동작(`0`)으로 기준을 먼저 잡고, 경계 점프가 실제로 보이면 `3` 으로 올린다 |
 | `--prompt` | `demo` | 학습과 **동일 문장** | 다르면 모델이 이미지 대신 프롬프트로 판별할 여지가 생긴다 |
+| `--camera-image-size` | `640x480` | 기본값 그대로 | 8-1 참조. 원본 1080p 를 보내면 왕복이 647ms 로 2.5Hz 예산(400ms)을 넘고, 학습 때와 다른 리샘플링을 거친다. **원격 PolicyServer 에서는 특히 건드리지 말 것** |
+| `--camera-decode-reduce` | `2` | 기본값 그대로 | 1080p 를 libjpeg 축소 디코드로 960x540 까지 싸게 내린다. 데이터 수집 때와 같은 경로 |
 
 ### Terminal 6 — Data Exporter (선택, 권장)
 
@@ -471,9 +610,44 @@ New action chunk (prompt: "...", latency: 0.132s)
 
 ## 8-8. 안전
 
-- **실기 전에 STEP 7 sim2sim 을 반드시 통과할 것.** 시뮬에서 넘어지면 실기에서도 넘어진다.
+**STEP 7 sim2sim 을 생략했으므로 이 절이 유일한 안전망이다.** 시뮬이 걸러주던
+"넘어지는가"를 실기 첫 구동에서 사람이 직접 받아내야 한다.
+
 - 첫 구동은 **사람이 붙잡을 수 있는 상태**로, `p` 로 언제든 일시정지할 수 있게 준비.
+  - 키보드 publisher(Terminal 4)에 **손을 올려둔 채로** 시작할 것.
+  - 이상하면 `p`(추론 정지) → 그래도 안 되면 `k`(제어루프 정지).
+- **첫 시도는 음성 조건(바나나 없음)으로 한다.** 정답이 "가만히 있기"라
+  모델이 크게 움직이면 그 자체가 이상 신호다. 양성 조건은 그다음.
 - `--initial-pose-blend-duration 1.0` (기본) 유지. `0` 은 초기 자세로 순간 이동해 위험하다.
+- `--chunk-blend-frames` 는 **하드웨어 미검증**이다. 첫 구동은 `0`(꺼짐)으로 시작해
+  기준 동작을 본 뒤, 경계 점프가 실제로 보이면 그때 `3` 으로 올린다.
+
+### 초기 자세 토큰 — 데모 시작 자세와 다르다 (알고 가는 것)
+
+`i` 를 누르면 가는 `LATENT_INITIAL_MOTION_TOKEN`
+([`gear_sonic/utils/inference/initial_poses.py`](../gear_sonic/utils/inference/initial_poses.py))
+은 NVIDIA 기본 standing 토큰이다. v2 데이터셋 79개 에피소드의 frame-0 토큰과
+비교하면 (2026-08-07 측정):
+
+| 항목 | 값 |
+|---|---|
+| `‖INITIAL_TOKEN‖` | 1.118 |
+| `‖평균 frame-0 토큰‖` | 1.282 |
+| 에피소드 간 자체 편차 | 평균 0.482 / 최대 1.080 |
+| **dist(frame-0, INITIAL)** | 최소 0.988 / **평균 1.210** / 최대 1.831 |
+| cosine(평균 frame-0, INITIAL) | **0.579** |
+
+즉 **데모 시작 분포에서 에피소드 자체 편차의 약 2.3배 떨어져 있고 방향도 다르다.**
+정책이 한 번도 시작점으로 본 적 없는 자세에서 추론이 시작되므로,
+**첫 action chunk 가 튈 수 있다.**
+
+**현재는 값을 유지하기로 했다** — 알려진 안전 standing 자세라는 점이 첫 구동에서는
+더 중요하다는 판단. 대신 이렇게 대응한다:
+
+- 첫 chunk 를 특히 주의해서 본다 (`p` 에 손 올려둔 채로)
+- 튀면 `--initial-pose-blend-duration` 을 2.0 으로 올려 완충
+- 그래도 안 되면 데모 시작 토큰으로 교체한다. medoid 는 `episode_000044` 의
+  frame-0 (평균과의 거리 0.222 로 79개 중 가장 대표적)
 
 ---
 
@@ -488,8 +662,24 @@ New action chunk (prompt: "...", latency: 0.132s)
 ## 실기 배포 시 필수 설정
 
 ```bash
+# PolicyServer — KIST 서버 (Terminal 2-a)
+ssh kist-5090 && tmux new -s policy
+source ~/groot_env.sh           # ★ 없으면 gated repo 401 로 죽는다 (HF_HOME)
+cd ~/Isaac-GR00T
+uv run python gr00t/eval/run_gr00t_server.py \
+    --model-path ~/groot_output/rab-v2b-20260806/checkpoint-2000 \
+    --embodiment-tag UNITREE_G1_SONIC --device cuda:0 --port 5550
+#                                ^^^^ 여기만 바꿔 체크포인트 교체
+#   ★ --port 를 빼면 기본값 5555 (카메라 서버와 충돌) 라 클라이언트가 못 붙는다
+
+# SSH 터널 — 로컬 (Terminal 2-b)
+ssh -N -L 5551:localhost:5550 kist-5090
+
+# VLA Inference (Terminal 5)
 python gear_sonic/scripts/run_vla_inference.py \
+    --host localhost --port 5551 \  # ★ 원격 PolicyServer 로 가는 터널
     --action-publish-rate 25 \      # ★ 기본값 50이면 동작이 2배 빨라진다
-    --chunk-blend-frames 3 \        # 경계 점프 완화 (0 = 기존 동작)
+    --chunk-blend-frames 0 \        # 첫 구동은 검증된 0. 경계 점프 보이면 3
+    --camera-image-size 640x480 \   # ★ 원본 1080p 면 왕복 647ms 로 예산 초과
     ...
 ```
