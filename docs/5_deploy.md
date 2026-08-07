@@ -25,14 +25,17 @@
 ┌─────────────────────┐    ZMQ TCP    ┌──────────────────────┐
 │  VLA Inference      │ ◄─────────── │  Camera Server       │
 │  T6  :5556 bind     │   :5555      │  T3  로봇 온보드      │
-└────┬───────────┬────┘              └──────────────────────┘
-     │ PUB :5556 │ SUB :5557
+│                     │              └──────────────────────┘
+│                     │   SUB :5580   ┌──────────────────────┐
+│                     │ ◄─────────── │  키보드 publisher     │
+└────┬───────────┬────┘              │  T5                  │
+     │ PUB :5556 │ SUB :5557         └──────────────────────┘
      ▼           ▼
-┌─────────────────────┐              ┌──────────────────────┐
-│  C++ Deploy         │ ◄─ SUB :5580 │  키보드 publisher     │
-│  T4                 │              │  T5                  │
-└─────────┬───────────┘              └──────────────────────┘
-          │ DDS (unitree SDK)          (T6 도 5580 을 구독)
+┌─────────────────────┐
+│  C++ Deploy         │   ★ 5580 을 구독하지 않는다.
+│  T4                 │     k/i/p 는 T6 가 받아 5556 으로 번역한다
+└─────────┬───────────┘
+          │ DDS (unitree SDK)
           ▼
      G1 로봇 (29 DoF + Dex3)
 ```
@@ -73,6 +76,25 @@
 | 로봇 네트워크 | `ping -c 3 192.168.123.164` | ❌ **무응답 — 전원 off** |
 
 **로봇 전원 말고는 전부 준비돼 있다.** 로봇을 켜면 남는 건 T3 카메라 서버뿐이다.
+
+### ★ Isaac-GR00T 에 소켓 수정이 들어 있어야 한다
+
+`.venv_inference` 는 `~/Isaac-GR00T` 를 **editable 로 물고 있다**(`gr00t` 가 그 경로에서
+import 된다). 그 레포에 아래 커밋이 있는지 확인한다:
+
+```bash
+cd ~/Isaac-GR00T && git log --oneline | grep 'close the abandoned socket'
+# a9c944a fix: close the abandoned socket when PolicyClient reconnects
+```
+
+없으면 **PolicyServer 가 죽었을 때 T6 를 `Ctrl+C` 로 죽일 수 없다.** `PolicyClient` 는
+타임아웃마다 REQ 소켓을 새로 만드는데, 버려진 소켓이 기본 무한 LINGER 라 전달 못 한 요청
+하나가 `context.term()` 을 영구 블록한다. `close()` 로도 안 풀린다 — 막고 있는 것은
+*현재* 소켓이 아니라 *버려진* 소켓이기 때문이다.
+
+**로봇이 마지막 자세로 굳은 채 프로세스가 안 죽는 상황**이 되므로, 실기 전에 반드시 확인한다.
+회귀 테스트는 `tests/gr00t/policy/test_policy_service.py::TestPolicyClientTeardownAfterFailedRequest`
+에 있다. 포크(`foodbanana/Isaac-GR00T`) `main` 에는 반영돼 있고, NVIDIA 원본에는 없다.
 
 ### 로컬 체크포인트 사본 (`~/models/`) — 원격이 막혔을 때의 대비책
 
@@ -269,6 +291,92 @@ cd ~/GR00T-WholeBodyControl
 `PASSED` 면 왕복 **190ms 내외**, `motion_token |max|` 가 **1.25 미만**이다.
 T2 의 `ss` 가 통과해도 여기서 막히면 서버 쪽 문제다.
 
+### 진단 명령 — 2026-08-07 에 실제로 쓴 것들
+
+막힌 지점을 좁힐 때 쓴 명령이다. 전부 **읽기 전용**이라 로봇을 움직이지 않는다.
+
+**어느 터미널까지 떴는지 한 번에 본다**
+
+```bash
+echo "=== 1. SSH 터널 ==="; ss -ltn | grep -q 5551 && echo "  OK  127.0.0.1:5551 LISTEN" || echo "  X   터널 없음"
+echo "=== 2. 로봇 네트워크 ==="; timeout 6 ping -c 2 -W 2 192.168.123.164 >/dev/null 2>&1 && echo "  OK" || echo "  X"
+echo "=== 3. 카메라 서버 ==="; timeout 5 bash -c 'cat < /dev/null > /dev/tcp/192.168.123.164/5555' 2>/dev/null && echo "  OK  5555 열림" || echo "  X"
+echo "=== 4. C++ deploy ==="; P=$(pgrep -f 'target/release/g1_deploy_onnx_ref' | head -1); [ -n "$P" ] && echo "  OK  pid $P" || echo "  X   미실행"
+echo "=== 5. 키보드 (5580) ==="; ss -ltn | grep -q 5580 && echo "  OK" || echo "  -   미실행"
+echo "=== 6. VLA 추론 (5556) ==="; ss -ltn | grep -q 5556 && echo "  OK" || echo "  -   미실행"
+```
+
+**`waiting for state msg` 에서 안 넘어갈 때** — 5557 에 어떤 토픽이 실제로 나오는지 본다.
+`robot_config` 만 나오면 **제어루프가 아직 시작 안 된 것**이므로 `k` 를 누르면 된다.
+
+```bash
+cd ~/GR00T-WholeBodyControl && .venv_inference/bin/python -c "
+import time, zmq
+ctx=zmq.Context(); s=ctx.socket(zmq.SUB); s.connect('tcp://localhost:5557')
+s.setsockopt_string(zmq.SUBSCRIBE,''); s.setsockopt(zmq.RCVTIMEO,300)
+t0=time.time(); topics=set()
+while time.time()-t0<8:
+    try: topics.add(s.recv_multipart()[0][:12])
+    except zmq.error.Again: pass
+print('토픽:', {t.decode('utf8','replace') for t in topics} or '없음')
+s.close(linger=0); ctx.term()
+"
+```
+
+**카메라가 실제로 몇 해상도로 오는지** — `--camera-decode-reduce` 를 정한 근거다.
+
+```bash
+cd ~/GR00T-WholeBodyControl && .venv_inference/bin/python -c "
+import time, numpy as np
+from gear_sonic.camera.composed_camera import ComposedCameraClientSensor
+for r in (1, 2):
+    cam = ComposedCameraClientSensor(server_ip='192.168.123.164', port=5555,
+                                     decode_reduce_factor={'ego_view': r})
+    msg, dl = None, time.time()+15
+    while time.time() < dl:
+        msg = cam.read()
+        if msg and msg.get('images'): break
+        time.sleep(0.05)
+    img = np.asarray(msg['images']['ego_view'])
+    i0, t0 = cam.idx, time.time()
+    while time.time()-t0 < 3.0: cam.read(); time.sleep(0.002)
+    print(f'reduce={r}: {img.shape}  {(cam.idx-i0)/3.0:.1f} fps  cams={sorted(msg[\"images\"])}')
+"
+# reduce=1: (480, 640, 3)  29.0 fps  cams=['ego_view']
+# reduce=2: (240, 320, 3)  29.3 fps  cams=['ego_view']
+```
+
+`cam.read()` 는 새 프레임이 없어도 **마지막 프레임을 되돌려주므로**, 발행률은 반드시
+`cam.idx`(새 메시지에만 증가)로 세야 한다. 반환값이 `None` 이 아닌 횟수를 세면
+폴링 속도를 재게 된다.
+
+**학습 때 무슨 해상도로 기록했는지** — exporter 로그의 진단 한 줄이 확정해 준다.
+
+```bash
+cd ~/GR00T-WholeBodyControl && grep -h "\[shape\] ego_view" data_exporter_*.log | sort -u
+# [shape] ego_view: 입력 (480, 640, 3) ... → 목표 (480,640)
+# [shape] ego_view: 입력 (540, 960, 3) ... → 목표 (480,640)
+```
+
+**두 줄이 나온다.** `(540, 960)` 은 ego_view 가 1080p 이던 **구형 세션**의 것이고,
+`(480, 640)` 이 v2 수집분이다. 어느 세션이 어느 쪽인지는 파일별로 봐야 갈린다:
+
+```bash
+for f in $(ls -1t data_exporter_*.log | head -12); do
+  s=$(grep -h "\[shape\] ego_view" $f | head -1 | sed 's/.*입력 //; s/ dtype.*//')
+  c=$(grep -c "\[shape\]" $f)
+  printf "%-38s ego_view=%-16s cams=%s\n" "$f" "${s:-없음}" "$c"
+done
+# data_exporter_20260806_210530.log  ego_view=(480, 640, 3)  cams=1
+# data_exporter_20260731_152947.log  ego_view=(480, 640, 3)  cams=3
+#   ...  v2 시기(07-29~08-06) 전부 (480, 640)
+```
+
+읽는 법: `[shape]` 는 **디코드 직후·리사이즈 직전**의 배열 모양이다.
+**입력 = 목표 → 리사이즈가 일어나지 않았다 → 640x480 전체 디코드(= reduce 1)** 다.
+reduce 2 였다면 입력이 `(240, 320)` 으로 찍히고 확대가 일어났어야 한다.
+`cams` 는 그 세션의 카메라 수로, v2 는 head-only 라 1 이다.
+
 ---
 
 ## 4. 키보드 조작 (T5 에서 입력)
@@ -460,6 +568,7 @@ New action chunk (prompt: "...", latency: 0.132s)
 | `latency:` 가 0.4s 초과 | 원격 경로가 밀림 | 터널·서버 확인 |
 | `action['motion_token'] max (...) > 1.25 ... skipping` | chunk 가 통째로 버려짐 | **로봇이 멈춘 것처럼 보인다.** 체크포인트의 토큰 크기 확인 |
 | 로그가 아예 멎음 | 터널/서버 사망 | 로봇은 **마지막 동작을 붙들고 굳는다** → `p` → `k` |
+| T6 가 `Ctrl+C` 로 안 죽음 | Isaac-GR00T 에 소켓 수정 누락 | [§1 소켓 수정](#-isaac-gr00t-에-소켓-수정이-들어-있어야-한다) 확인. 급하면 `kill -9` |
 | `i` 후 팔이 올라감 | 이전 세션 상태 이월 | **T6 재시작** 후 다시 ([§4](#-2번에서-팔이-올라가면-그-실행은-버린다)) |
 | `401 ... Cosmos-Reason2-2B` | T1 에서 `source ~/groot_env.sh` 누락 | 다시 |
 | 클라이언트가 조용히 안 붙음 | T1 의 `--port` 누락(기본 5555) | 다시 |
